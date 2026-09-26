@@ -12,8 +12,8 @@ struct SetupView: View {
                     Image(systemName: "opticaldisc.fill")
                         .font(.largeTitle).foregroundStyle(StudioStyle.accent)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("BR").font(.title.bold())
-                        Text("DISC STUDIO").font(.caption2.weight(.semibold)).tracking(2).foregroundStyle(.secondary)
+                        Text("Disc Studio").font(.title.bold())
+                        Text("光盘刻录工作台").font(.caption2.weight(.semibold)).tracking(2).foregroundStyle(.secondary)
                     }
                 }.padding(.top, 8)
 
@@ -112,11 +112,6 @@ struct SetupView: View {
                     optionToggle("写入后校验", subtitle: "回读光盘，与写入数据校验和比对", isOn: $store.options.verify)
                     optionToggle("完成后弹出", subtitle: "全部操作完成后弹出光盘", isOn: $store.options.eject)
                 }.disabled(store.isBusy || store.isDemo)
-
-                HStack(spacing: 6) {
-                    Image(systemName: "lock.shield")
-                    Text("所有镜像均在本机处理")
-                }.font(.caption).foregroundStyle(.secondary)
             }.padding(24)
         }
         .frame(width: 300)

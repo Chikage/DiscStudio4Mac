@@ -9,7 +9,7 @@ struct BRApp: App {
     @AppStorage("appearance") private var appearance = "system"
 
     var body: some Scene {
-        Window("BR · 光盘刻录", id: "main") {
+        Window("Disc Studio · 光盘刻录", id: "main") {
             WorkspaceView(store: store)
                 .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
                 .task {
@@ -86,7 +86,7 @@ enum FilePanels {
 
     static func exportLog(store: BurnStore) {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "BR-刻录日志.txt"
+        panel.nameFieldStringValue = "Disc Studio-刻录日志.txt"
         panel.begin { result in
             guard result == .OK, let url = panel.url else { return }
             do { try store.logText.write(to: url, atomically: true, encoding: .utf8) } catch {

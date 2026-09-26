@@ -21,12 +21,17 @@ struct WorkspaceView: View {
                                 .padding(12).background(
                                     StudioStyle.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
                         }
-                        ProgressDashboard(store: store)
                         HStack(alignment: .top, spacing: 18) {
                             SpeedChartView(store: store).frame(maxWidth: .infinity)
-                            BufferView(store: store).frame(width: 250)
+                            CurrentProgressView(store: store).frame(width: 250)
                         }
-                        LogView(store: store)
+                        .fixedSize(horizontal: false, vertical: true)
+                        HStack(alignment: .top, spacing: 18) {
+                            LogView(store: store).frame(maxWidth: .infinity)
+                            DeviceInfoView(device: store.selectedDevice, isDemo: store.isDemo)
+                                .frame(width: 250)
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
                     }.padding(24).padding(.top, 0)
                 }
                 footer
@@ -62,7 +67,6 @@ struct WorkspaceView: View {
         HStack {
             VStack(alignment: .leading, spacing: 6) {
                 Text("光盘刻录工作台").font(.title2.bold())
-                Text("从镜像到光盘，每一步清晰可见。").font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer()
             if store.isDemo {
@@ -135,13 +139,77 @@ struct LogView: View {
                         ForEach(store.logs.reversed()) { item in
                             HStack(alignment: .top, spacing: 14) {
                                 Text(item.date, style: .time).monospacedDigit().foregroundStyle(.secondary)
+                                    .fixedSize()
                                 Text(item.message).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }.font(.caption)
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }.frame(height: 100)
             }
         }
+    }
+}
+
+struct DeviceInfoView: View {
+    let device: DiscDevice?
+    var isDemo = false
+
+    var body: some View {
+        StudioPanel(title: "光驱信息", symbol: "opticaldiscdrive") {
+            if isDemo {
+                Text("演示模式不显示硬件信息。")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else if device == nil {
+                Text("连接并选择光驱后显示设备信息。")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else if details.isEmpty {
+                Text("设备未提供硬件信息。")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(details, id: \.label) { detail in
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text(detail.label).foregroundStyle(.secondary).fixedSize()
+                            Spacer(minLength: 0)
+                            Text(detail.value)
+                                .multilineTextAlignment(.trailing)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                        .font(.caption)
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+        }
+    }
+
+    private var details: [(label: String, value: String)] {
+        guard let device, !isDemo else { return [] }
+        let location = device.location.map {
+            switch $0 {
+            case "Internal": "内置"
+            case "External": "外置"
+            default: $0
+            }
+        }
+        let fields: [(String, String?)] = [
+            ("厂商", device.vendor),
+            ("型号", device.product),
+            ("固件版本", device.firmware),
+            ("连接方式", device.interconnect),
+            ("设备位置", location),
+            (
+                "写入缓存",
+                device.bufferCapacity.map {
+                    ByteCountFormatter.string(fromByteCount: $0, countStyle: .memory)
+                }
+            ),
+            ("支持刻录", device.writableMedia.isEmpty ? nil : device.writableMedia.joined(separator: " · ")),
+        ]
+        return fields.compactMap { label, value in value.map { (label, $0) } }
     }
 }
 

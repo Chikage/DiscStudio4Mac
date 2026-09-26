@@ -9,7 +9,8 @@ public final class BurnStore {
     public private(set) var image: DiscImage?
     public var options = BurnOptions()
     public private(set) var snapshot = BurnSnapshot()
-    public private(set) var samples: [SpeedSample] = []
+    public private(set) var speedHistory = SpeedHistory()
+    public private(set) var verificationSpeed = VerificationSpeedEstimator()
     public private(set) var logs: [BurnLogEntry] = []
     public private(set) var isLoadingImage = false
     public private(set) var isDemo = false
@@ -56,7 +57,7 @@ public final class BurnStore {
             MainActor.assumeIsolated { self?.receive(snapshot) }
         }
         engine.observeDevices()
-        appendLog("BR 已就绪，等待选择镜像与刻录设备。")
+        appendLog("Disc Studio 已就绪，等待选择镜像与刻录设备。")
     }
 
     public func refreshDevices() { if !isDemo { engine.refreshDevices() } }
@@ -69,7 +70,8 @@ public final class BurnStore {
         isLoadingImage = true
         image = nil
         snapshot = BurnSnapshot()
-        samples = []
+        speedHistory = SpeedHistory()
+        verificationSpeed = VerificationSpeedEstimator()
         startedAt = nil
         finishedAt = nil
         lastStatusAt = nil
@@ -145,7 +147,7 @@ public final class BurnStore {
     public var logText: String {
         let formatter = ISO8601DateFormatter()
         return
-            (["BR 刻录日志\(isDemo ? " [演示数据]" : "")"]
+            (["Disc Studio 刻录日志\(isDemo ? " [演示数据]" : "")"]
             + logs.map {
                 "[\(formatter.string(from: $0.date))] \($0.message)"
             }).joined(separator: "\n")
@@ -157,7 +159,9 @@ public final class BurnStore {
     }
 
     private func resetSession() {
-        samples = []
+        snapshot = BurnSnapshot()
+        speedHistory = SpeedHistory()
+        verificationSpeed = VerificationSpeedEstimator()
         startedAt = Date()
         finishedAt = nil
         lastStatusAt = nil
@@ -168,11 +172,15 @@ public final class BurnStore {
     private func receive(_ update: BurnSnapshot) {
         let previous = snapshot.phase
         snapshot = update
-        lastStatusAt = Date()
+        let now = Date()
+        lastStatusAt = now
         if previous != update.phase { appendLog(update.phase.title) }
-        if let speed = update.speedKB {
-            samples.append(SpeedSample(seconds: elapsed(), megabytesPerSecond: speed / 1000))
-            if samples.count > 180 { samples.removeFirst(samples.count - 180) }
+        let seconds = elapsed(at: now)
+        speedHistory.beginPhase(update.phase)
+        verificationSpeed.update(update, totalBytes: image?.burnBytes ?? 0, at: seconds)
+        let speed = update.phase == .verifying ? verificationSpeed.kilobytesPerSecond : update.speedKB
+        if let speed {
+            speedHistory.append(SpeedSample(seconds: seconds, megabytesPerSecond: speed / 1000))
         }
         if !update.phase.isActive && update.phase != .idle {
             finishedAt = Date()
@@ -238,7 +246,8 @@ public final class BurnStore {
         isDemo = false
         image = nil
         snapshot = BurnSnapshot()
-        samples = []
+        speedHistory = SpeedHistory()
+        verificationSpeed = VerificationSpeedEstimator()
         logs = []
         startedAt = nil
         finishedAt = nil

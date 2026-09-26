@@ -1,10 +1,10 @@
-# BR · 光盘刻录工作台
+# Disc Studio · 光盘刻录工作台
 
 macOS 原生光盘镜像刻录应用，SwiftUI + Swift 6 + Apple DiscRecording。最低 macOS 14，支持 Apple Silicon 和 Intel Mac。界面使用简体中文，自动适配系统明暗主题，也可在「显示 → 外观」中选择。
 
 ## 运行
 
-直接打开 `build/BR.app`，或在项目根目录运行：
+直接打开 `build/Disc Studio.app`，或在项目根目录运行：
 
 ```sh
 ./Scripts/build.sh

@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "BR",
+    name: "DiscStudio",
     platforms: [.macOS(.v14)],
-    products: [.executable(name: "BR", targets: ["BR"]), .library(name: "BRCore", targets: ["BRCore"])],
+    products: [.executable(name: "Disc Studio", targets: ["BR"]), .library(name: "BRCore", targets: ["BRCore"])],
     targets: [
         .target(
             name: "DiscBridge", publicHeadersPath: "include",

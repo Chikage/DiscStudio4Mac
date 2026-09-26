@@ -17,6 +17,7 @@ packages:
 targets:
   BR:
     type: application
+    productName: Disc Studio
     platform: macOS
     sources:
       - path: Sources/BR
@@ -31,7 +32,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.br.discburner
-        PRODUCT_NAME: BR
+        PRODUCT_NAME: Disc Studio
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Resources/Info.plist
         ENABLE_APP_SANDBOX: NO

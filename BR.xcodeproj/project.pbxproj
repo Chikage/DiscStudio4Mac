@@ -10,7 +10,6 @@
 		1857069AA8694B3E39C49A4D /* BRApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F437343B368903557C3F7F49 /* BRApp.swift */; };
 		20E6085712888BB9EBBF0EAA /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 7D73A56B5B4B40C7E0A8B102 /* AppIcon.icns */; };
 		22A88A10AC597D73CC74A526 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2EA392433371625F4811BC34 /* Components.swift */; };
-		53D7FE75B2C0E07864B44E89 /* ProgressDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25897451819F9D5AC8AC9840 /* ProgressDashboard.swift */; };
 		818019FC0027661A1CCC24E0 /* BRCore in Frameworks */ = {isa = PBXBuildFile; productRef = C1B408B239D091281B0EDC39 /* BRCore */; };
 		C13DB08AEB0FDF02037B4944 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = B7EABE0B9ABE151A3EFAE503 /* Localizable.xcstrings */; };
 		CC7274E3F8A0F5BFEA6A4E6E /* SetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF375B5E9A46CFB1DF02FF46 /* SetupView.swift */; };
@@ -19,15 +18,14 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		25897451819F9D5AC8AC9840 /* ProgressDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressDashboard.swift; sourceTree = "<group>"; };
 		2EA392433371625F4811BC34 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		38F06B7A9F18957C2D3BAEE6 /* TelemetryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryViews.swift; sourceTree = "<group>"; };
-		6211D51754D5AB4C035A03DD /* BR.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BR.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7047380247A89584F7B7EBDD /* WorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceView.swift; sourceTree = "<group>"; };
 		7D73A56B5B4B40C7E0A8B102 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
-		98D42CE87FA0F0AEC0B10CB3 /* BR */ = {isa = PBXFileReference; lastKnownFileType = folder; name = BR; path = .; sourceTree = SOURCE_ROOT; };
 		B7EABE0B9ABE151A3EFAE503 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		BB52A19841324A38B86D32C3 /* Disc Studio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Disc Studio.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		DF375B5E9A46CFB1DF02FF46 /* SetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupView.swift; sourceTree = "<group>"; };
+		E30539992EBA7AB0DA62DD26 /* DiscStudio */ = {isa = PBXFileReference; lastKnownFileType = folder; name = DiscStudio; path = .; sourceTree = SOURCE_ROOT; };
 		F437343B368903557C3F7F49 /* BRApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BRApp.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -66,7 +64,6 @@
 			isa = PBXGroup;
 			children = (
 				2EA392433371625F4811BC34 /* Components.swift */,
-				25897451819F9D5AC8AC9840 /* ProgressDashboard.swift */,
 				DF375B5E9A46CFB1DF02FF46 /* SetupView.swift */,
 				38F06B7A9F18957C2D3BAEE6 /* TelemetryViews.swift */,
 				7047380247A89584F7B7EBDD /* WorkspaceView.swift */,
@@ -96,7 +93,7 @@
 		E8ADA0EE9F95DB4BBC67AD52 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				6211D51754D5AB4C035A03DD /* BR.app */,
+				BB52A19841324A38B86D32C3 /* Disc Studio.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -104,7 +101,7 @@
 		EC392B83A5EEE85EAFB0C4CE /* Packages */ = {
 			isa = PBXGroup;
 			children = (
-				98D42CE87FA0F0AEC0B10CB3 /* BR */,
+				E30539992EBA7AB0DA62DD26 /* DiscStudio */,
 			);
 			name = Packages;
 			sourceTree = "<group>";
@@ -129,7 +126,7 @@
 				C1B408B239D091281B0EDC39 /* BRCore */,
 			);
 			productName = BR;
-			productReference = 6211D51754D5AB4C035A03DD /* BR.app */;
+			productReference = BB52A19841324A38B86D32C3 /* Disc Studio.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -187,7 +184,6 @@
 			files = (
 				1857069AA8694B3E39C49A4D /* BRApp.swift in Sources */,
 				22A88A10AC597D73CC74A526 /* Components.swift in Sources */,
-				53D7FE75B2C0E07864B44E89 /* ProgressDashboard.swift in Sources */,
 				CC7274E3F8A0F5BFEA6A4E6E /* SetupView.swift in Sources */,
 				E2BD25439C8BB112967DEEEC /* TelemetryViews.swift in Sources */,
 				EF076A2E1394EE98B60244AB /* WorkspaceView.swift in Sources */,
@@ -269,7 +265,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = app.br.discburner;
-				PRODUCT_NAME = BR;
+				PRODUCT_NAME = "Disc Studio";
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -287,7 +283,7 @@
 					"@executable_path/../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = app.br.discburner;
-				PRODUCT_NAME = BR;
+				PRODUCT_NAME = "Disc Studio";
 				SDKROOT = macosx;
 			};
 			name = Release;

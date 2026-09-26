@@ -81,6 +81,147 @@ struct BurnTests {
         #expect(device(["speeds": [5540.0, 5540.0, Double.nan]]).speeds == [5540])
     }
 
+    @Test func hardwareMetadataOmitsMissingAndUnreportedValues() {
+        let absent = device()
+        #expect(absent.vendor == nil && absent.product == nil && absent.firmware == nil)
+        #expect(absent.interconnect == nil && absent.location == nil)
+        #expect(absent.writableMedia.isEmpty)
+
+        let incomplete = device([
+            "vendor": " \n", "product": 42, "firmware": NSNull(),
+            "interconnect": " unknown ", "location": "Unknown", "writableMedia": ["", "Unknown"],
+        ])
+        #expect(incomplete.vendor == nil && incomplete.product == nil && incomplete.firmware == nil)
+        #expect(incomplete.interconnect == nil && incomplete.location == nil)
+        #expect(incomplete.writableMedia.isEmpty)
+    }
+
+    @Test func hardwareMetadataPreservesReportedValuesWithoutMedia() {
+        let drive = device([
+            "present": false, "vendor": " HL-DT-ST ", "product": "BD-RE BP55EB40",
+            "firmware": "1.00", "interconnect": "USB", "location": "External",
+            "writableMedia": ["CD", "DVD", "BD"], "bufferCapacity": 4_161_536,
+        ])
+        #expect(drive.vendor == "HL-DT-ST")
+        #expect(drive.product == "BD-RE BP55EB40")
+        #expect(drive.firmware == "1.00")
+        #expect(drive.interconnect == "USB" && drive.location == "External")
+        #expect(drive.writableMedia == ["CD", "DVD", "BD"])
+        #expect(drive.bufferCapacity == 4_161_536)
+    }
+
+    @Test func speedHistoryRetainsAFullMinuteAtHighUpdateRates() {
+        var history = SpeedHistory()
+        // Ten readings per second over a long burn must not collapse into the last 180 readings.
+        for tick in 0...9000 {
+            history.append(SpeedSample(seconds: Double(tick) / 10, megabytesPerSecond: 17))
+        }
+        let visible = history.samples(at: 900)
+        #expect(visible.count == 601)
+        #expect(visible.first?.seconds == 840)
+        #expect(visible.last?.seconds == 900)
+        #expect(history.samples.count == visible.count)
+    }
+
+    @Test func speedHistoryUsesTimeBoundariesAndAgesWithoutNewReadings() {
+        var history = SpeedHistory()
+        for seconds in [0.0, 29.0, 30.0, 60.0, 90.0] {
+            history.append(SpeedSample(seconds: seconds, megabytesPerSecond: 10))
+        }
+        #expect(history.samples(at: 90).map(\.seconds) == [30, 60, 90])
+        #expect(history.samples(at: 120).map(\.seconds) == [60, 90])
+        #expect(history.samples(at: 151).isEmpty)
+    }
+
+    @Test func speedHistoryStartsEmptyAndPreservesEarlySamples() {
+        var history = SpeedHistory()
+        #expect(history.samples(at: 0).isEmpty)
+        history.append(SpeedSample(seconds: 2, megabytesPerSecond: 0))
+        history.append(SpeedSample(seconds: 5, megabytesPerSecond: 12))
+        #expect(history.samples(at: 5).map(\.megabytesPerSecond) == [0, 12])
+        #expect(history.samples(at: 3).map(\.seconds) == [2])
+        history = SpeedHistory()
+        #expect(history.samples(at: 0).isEmpty)
+    }
+
+    @Test func verificationStartsANewSpeedCurveAndRetainsItsMeaningAfterCompletion() {
+        var history = SpeedHistory()
+        history.append(SpeedSample(seconds: 40, megabytesPerSecond: 17))
+        history.beginPhase(.finishing)
+        #expect(history.samples.count == 1)
+        history.beginPhase(.verifying)
+        #expect(history.samples.isEmpty)
+        #expect(history.phase == .verifying)
+        history.append(SpeedSample(seconds: 45, megabytesPerSecond: 12))
+        history.beginPhase(.verifying)
+        history.beginPhase(.completed)
+        #expect(history.samples(at: 45).map(\.megabytesPerSecond) == [12])
+        #expect(history.phase == .verifying)
+        history.beginPhase(.writing)
+        #expect(history.samples.isEmpty)
+        #expect(history.phase == .writing)
+    }
+
+    @Test func verificationSpeedEstimatesReadProgressWithoutReusingWriteSpeed() throws {
+        var estimator = VerificationSpeedEstimator()
+        var snapshot = BurnSnapshot(dictionary: ["phase": "verifying", "progress": 0.1, "speedKB": 9000])
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 10)
+        #expect(estimator.kilobytesPerSecond == nil)
+        snapshot.progress = 0.11
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 10.2)
+        #expect(estimator.kilobytesPerSecond == nil)
+        snapshot.progress = 0.12
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 11)
+        let speed = try #require(estimator.kilobytesPerSecond)
+        #expect(abs(speed - 2000) < 0.001)
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 12)
+        #expect(estimator.kilobytesPerSecond == 0)
+        snapshot.phase = .completed
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 13)
+        #expect(estimator.kilobytesPerSecond == nil)
+    }
+
+    @Test func verificationSpeedResetsAcrossTracksMissingProgressAndCancellation() {
+        var estimator = VerificationSpeedEstimator()
+        var snapshot = BurnSnapshot(dictionary: ["phase": "verifying", "progress": 0.5, "track": 1])
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 10)
+        snapshot.track = 2
+        snapshot.progress = 0.6
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 11)
+        #expect(estimator.kilobytesPerSecond == nil)
+        snapshot.progress = 0.1
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 12)
+        #expect(estimator.kilobytesPerSecond == nil)
+        snapshot.progress = 0.2
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 13)
+        #expect(estimator.kilobytesPerSecond != nil)
+        snapshot.progress = nil
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 14)
+        #expect(estimator.kilobytesPerSecond == nil)
+        snapshot.progress = 0.3
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 15)
+        #expect(estimator.kilobytesPerSecond == nil)
+        snapshot.progress = 0.4
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 16)
+        #expect(estimator.kilobytesPerSecond != nil)
+        snapshot.cancelling = true
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 17)
+        #expect(estimator.kilobytesPerSecond == nil)
+    }
+
+    @Test func verificationSpeedRejectsUnavailableSizeAndInvalidTiming() {
+        var estimator = VerificationSpeedEstimator()
+        var snapshot = BurnSnapshot(dictionary: ["phase": "verifying", "progress": 0.1])
+        estimator.update(snapshot, totalBytes: 0, at: 10)
+        #expect(estimator.kilobytesPerSecond == nil)
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 10)
+        snapshot.progress = 0.2
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 9)
+        #expect(estimator.kilobytesPerSecond == nil)
+        estimator.update(snapshot, totalBytes: 100_000_000, at: .nan)
+        #expect(estimator.kilobytesPerSecond == nil)
+    }
+
     @MainActor @Test func demoCannotStartRealBurnAndCanBeCancelled() {
         let store = BurnStore()
         store.startDemo()

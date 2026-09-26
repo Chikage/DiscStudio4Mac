@@ -31,6 +31,12 @@ public struct DiscDevice: Identifiable, Sendable, Equatable {
     public let baseSpeed: Double
     public let bufferCapacity: Int64?
     public let underrunProtection: Bool?
+    public let vendor: String?
+    public let product: String?
+    public let firmware: String?
+    public let interconnect: String?
+    public let location: String?
+    public let writableMedia: [String]
 
     public init(dictionary: [String: Any]) {
         id = dictionary["id"] as? String ?? ""
@@ -49,6 +55,18 @@ public struct DiscDevice: Identifiable, Sendable, Equatable {
         let capacity = (dictionary["bufferCapacity"] as? NSNumber)?.int64Value
         bufferCapacity = capacity.flatMap { $0 > 0 ? $0 : nil }
         underrunProtection = dictionary["underrunProtection"] as? Bool
+        vendor = Self.hardwareText(dictionary["vendor"])
+        product = Self.hardwareText(dictionary["product"])
+        firmware = Self.hardwareText(dictionary["firmware"])
+        interconnect = Self.hardwareText(dictionary["interconnect"])
+        location = Self.hardwareText(dictionary["location"])
+        writableMedia = (dictionary["writableMedia"] as? [String] ?? []).compactMap(Self.hardwareText)
+    }
+
+    private static func hardwareText(_ value: Any?) -> String? {
+        guard let value = value as? String else { return nil }
+        let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty || text.caseInsensitiveCompare("Unknown") == .orderedSame ? nil : text
     }
 
     public var status: String {
@@ -128,6 +146,61 @@ public struct SpeedSample: Identifiable, Sendable {
     public init(seconds: Double, megabytesPerSecond: Double) {
         self.seconds = seconds
         self.megabytesPerSecond = megabytesPerSecond
+    }
+}
+
+public struct SpeedHistory: Sendable {
+    public static let windowDuration: TimeInterval = 60
+    public private(set) var phase: BurnPhase = .writing
+    public private(set) var samples: [SpeedSample] = []
+
+    public init() {}
+
+    public mutating func beginPhase(_ phase: BurnPhase) {
+        guard phase == .writing || phase == .verifying, phase != self.phase else { return }
+        self.phase = phase
+        samples = []
+    }
+
+    public mutating func append(_ sample: SpeedSample) {
+        samples.append(sample)
+        samples.removeAll { $0.seconds < sample.seconds - Self.windowDuration }
+    }
+
+    public func samples(at seconds: TimeInterval) -> [SpeedSample] {
+        let window = (seconds - Self.windowDuration)...seconds
+        return samples.filter { window.contains($0.seconds) }
+    }
+}
+
+/// DiscRecording exposes write speed only. Estimate verification throughput from progress instead.
+public struct VerificationSpeedEstimator: Sendable {
+    public private(set) var kilobytesPerSecond: Double?
+    private var baseline: (progress: Double, seconds: TimeInterval, track: Int?, bytes: Int64)?
+
+    public init() {}
+
+    public mutating func update(_ snapshot: BurnSnapshot, totalBytes: Int64, at seconds: TimeInterval) {
+        guard snapshot.phase == .verifying, !snapshot.cancelling,
+            let progress = snapshot.progress, progress.isFinite, (0...1).contains(progress),
+            totalBytes > 0, seconds.isFinite, seconds >= 0
+        else {
+            self = Self()
+            return
+        }
+        let current = (progress: progress, seconds: seconds, track: snapshot.track, bytes: totalBytes)
+        guard let baseline, baseline.track == snapshot.track, baseline.bytes == totalBytes,
+            progress >= baseline.progress, seconds >= baseline.seconds
+        else {
+            self.baseline = current
+            kilobytesPerSecond = nil
+            return
+        }
+        // Accumulate at least one second so closely spaced notifications do not produce spikes.
+        let interval = seconds - baseline.seconds
+        guard interval >= 1 else { return }
+        kilobytesPerSecond = (progress - baseline.progress) * Double(totalBytes) / interval / 1000
+        self.baseline = current
     }
 }
 

@@ -61,6 +61,32 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
         @"freeBlocks": media[DRDeviceMediaBlocksFreeKey] ?: @0,
         @"speeds": status[DRDeviceBurnSpeedsKey] ?: @[], @"baseSpeed": @(base)
     } mutableCopy];
+    NSDictionary *hardwareKeys = @{
+        @"vendor": DRDeviceVendorNameKey,
+        @"product": DRDeviceProductNameKey,
+        @"firmware": DRDeviceFirmwareRevisionKey,
+        @"interconnect": DRDevicePhysicalInterconnectKey,
+        @"location": DRDevicePhysicalInterconnectLocationKey
+    };
+    for (NSString *key in hardwareKeys) {
+        id value = info[hardwareKeys[key]];
+        if ([value isKindOfClass:NSString.class]) result[key] = value;
+    }
+    if ([result[@"location"] isEqual:DRDevicePhysicalInterconnectLocationInternal]) {
+        result[@"location"] = @"Internal";
+    } else if ([result[@"location"] isEqual:DRDevicePhysicalInterconnectLocationExternal]) {
+        result[@"location"] = @"External";
+    } else if ([result[@"location"] isEqual:DRDevicePhysicalInterconnectLocationUnknown]) {
+        [result removeObjectForKey:@"location"];
+    }
+    NSMutableArray *writableMedia = [NSMutableArray array];
+    for (NSArray *format in @[
+        @[@"CD", DRDeviceCanWriteCDKey], @[@"DVD", DRDeviceCanWriteDVDKey],
+        @[@"BD", DRDeviceCanWriteBDKey], @[@"HD DVD", DRDeviceCanWriteHDDVDKey]
+    ]) {
+        if ([capabilities[format[1]] boolValue]) [writableMedia addObject:format[0]];
+    }
+    if (writableMedia.count) result[@"writableMedia"] = writableMedia;
     // DiscRecording reports this MMC cache field in KiB (also shown as 'k' by drutil info).
     // Normalize to bytes at the bridge boundary; confirmed against this host's 4064k drive.
     uint64_t bufferKiB = [info[DRDeviceWriteBufferSizeKey] unsignedLongLongValue];
@@ -154,7 +180,7 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
     else if (device.mediaIsBusy || device.mediaIsTransitioning) failure = @"刻录设备正忙，请稍后重试。";
     else if (!device.mediaIsPresent) failure = @"请插入一张空白可写光盘。";
     // Existing contents are never erased or appended to implicitly.
-    else if (!device.mediaIsBlank) failure = @"请使用空白光盘；BR 不会自动擦除已有数据。";
+    else if (!device.mediaIsBlank) failure = @"请使用空白光盘；Disc Studio 不会自动擦除已有数据。";
     else {
         NSDictionary *snapshot = [self snapshot:device];
         if ([snapshot[@"freeBlocks"] unsignedLongLongValue] < self.requiredBlocks) failure = @"光盘可用容量不足，或设备尚未报告容量。";
