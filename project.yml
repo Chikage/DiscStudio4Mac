@@ -1,0 +1,42 @@
+name: BR
+options:
+  bundleIdPrefix: app.br
+  deploymentTarget:
+    macOS: '14.0'
+  developmentLanguage: zh-Hans
+settings:
+  base:
+    SWIFT_VERSION: '6.0'
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: '14.0'
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+packages:
+  BRPackage:
+    path: .
+targets:
+  BR:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/BR
+        excludes: [Resources]
+      - path: Sources/BR/Resources
+        buildPhase: resources
+      - path: Resources/AppIcon.icns
+        buildPhase: resources
+    dependencies:
+      - package: BRPackage
+        product: BRCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.br.discburner
+        PRODUCT_NAME: BR
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Resources/Info.plist
+        ENABLE_APP_SANDBOX: NO
+schemes:
+  BR:
+    build:
+      targets:
+        BR: all
