@@ -1,6 +1,7 @@
 import AppKit
 import BRCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct BRApp: App {
@@ -9,7 +10,7 @@ struct BRApp: App {
     @AppStorage("appearance") private var appearance = "system"
 
     var body: some Scene {
-        Window("Disc Studio · 光盘刻录", id: "main") {
+        Window("Disc Studio · 光盘与镜像", id: "main") {
             WorkspaceView(store: store)
                 .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
                 .task {
@@ -17,7 +18,11 @@ struct BRApp: App {
                     store.connect()
                     if CommandLine.arguments.contains("--demo") { store.startDemo() }
                 }
-                .onOpenURL { store.selectImage($0) }
+                .onOpenURL {
+                    guard !store.isBusy, !store.isDemo else { return }
+                    store.mode = .burn
+                    store.selectImage($0)
+                }
         }
         .defaultSize(width: 1180, height: 820)
         .windowResizability(.contentMinSize)
@@ -25,6 +30,10 @@ struct BRApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("打开光盘镜像…") { FilePanels.chooseImage(store: store) }
                     .keyboardShortcut("o").disabled(store.isBusy || store.isDemo)
+                Button("从光盘创建镜像") { store.mode = .copyDisc }
+                    .disabled(store.isBusy || store.isDemo || store.isLoadingImage)
+                Button("从文件创建 ISO") { store.mode = .buildISO }
+                    .keyboardShortcut("n").disabled(store.isBusy || store.isDemo || store.isLoadingImage)
             }
             CommandMenu("刻录") {
                 Button("刷新刻录设备") { store.refreshDevices() }
@@ -57,9 +66,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard store?.isBusy == true else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "刻录任务仍在进行"
-        alert.informativeText = "请先在窗口中停止刻录，并等待设备清理完成后再退出。"
-        alert.addButton(withTitle: "返回刻录任务")
+        alert.messageText = "光盘任务仍在进行"
+        alert.informativeText = "请先在窗口中停止当前任务，并等待清理完成后再退出。"
+        alert.addButton(withTitle: "返回任务")
         alert.runModal()
         NSApp.windows.first?.makeKeyAndOrderFront(nil)
         return .terminateCancel
@@ -80,7 +89,38 @@ enum FilePanels {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.begin { result in
-            if result == .OK, let url = panel.url { store.selectImage(url) }
+            if result == .OK, let url = panel.url, !store.isBusy, !store.isDemo {
+                store.mode = .burn
+                store.selectImage(url)
+            }
+        }
+    }
+
+    static func addDataFiles(job: ImageCreationStore) {
+        guard !job.isBusy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "添加数据光盘内容"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.begin { result in
+            if result == .OK { job.addSources(panel.urls) }
+        }
+    }
+
+    static func saveImage(store: BurnStore) {
+        guard !store.isBusy, !store.isLoadingImage, !store.isDemo else { return }
+        let mode = store.mode
+        let job = store.imageCreation
+        let extensionName = mode == .buildISO ? "iso" : job.copyFormat.rawValue
+        let panel = NSSavePanel()
+        panel.title = mode == .buildISO ? "创建数据光盘 ISO" : "保存光盘镜像"
+        panel.nameFieldStringValue = mode == .buildISO ? "\(job.volumeName).iso" : "光盘副本.\(extensionName)"
+        panel.allowedContentTypes = [UTType(filenameExtension: extensionName) ?? .diskImage]
+        panel.canCreateDirectories = true
+        panel.begin { result in
+            guard result == .OK, let url = panel.url, store.mode == mode else { return }
+            store.createImage(to: url)
         }
     }
 

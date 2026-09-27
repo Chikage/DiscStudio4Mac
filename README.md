@@ -1,6 +1,6 @@
 # Disc Studio · 光盘刻录工作台
 
-macOS 原生光盘镜像刻录应用，SwiftUI + Swift 6 + Apple DiscRecording。最低 macOS 14，仅支持 Apple Silicon（arm64），不再支持 Intel Mac。界面使用简体中文，自动适配系统明暗主题，也可在「显示 → 外观」中选择。
+macOS 原生光盘与镜像工作台，支持镜像刻录、光盘转镜像及文件制作数据 ISO，使用 SwiftUI + Swift 6 + Apple DiscRecording 和系统镜像工具。最低 macOS 14，仅支持 Apple Silicon（arm64），不再支持 Intel Mac。界面使用简体中文，自动适配系统明暗主题，也可在「显示 → 外观」中选择。
 
 ## 运行
 
@@ -27,6 +27,26 @@ macOS 原生光盘镜像刻录应用，SwiftUI + Swift 6 + Apple DiscRecording�
 
 ## 功能与边界
 
+### 光盘转镜像
+
+1. 在顶部切换到「光盘转镜像」，选择光驱并插入已有数据的光盘。
+2. 选择 ISO、CDR（DVD/CD 主映像）或压缩 DMG。
+3. 点击「保存光盘镜像…」，选择保存位置。完成后可在 Finder 中显示，或直接载入刻录工作台。
+
+此功能从设备读取扇区，保留原有数据光盘文件系统，不将光盘文件重新打包。支持单轨、单会话的 ISO 9660 / UDF 数据光盘；暂不支持音频 CD、混合轨道、多会话、其他文件系统或受保护光盘。读盘错误会报告失败，不跳过坏扇区。不会擦除、写入或自动弹出来源光盘。
+
+### 文件制作数据 ISO
+
+1. 切换到「文件制作 ISO」（或按 ⌘N），添加或拖入任意类型的普通文件和文件夹，可以多选。
+2. 设置光盘名称和文件系统：ISO 9660 + Joliet 适合通用数据光盘；UDF 适合大文件和长文件名。两者都保存为 `.iso`。
+3. 点击「创建 ISO…」选择保存位置。无需连接光驱，文件夹作为根目录项目保留原有层级。
+
+Joliet 模式会拒绝单个达到 4 GiB 的文件及超过 64 个 UTF-16 字符的名称，提示改用 UDF。根目录重名、符号链接、特殊文件、不可读内容及输出覆盖源文件会明确报错。普通数据光盘不保留 macOS 扩展属性、资源叉或 ACL；不会自动制作启动盘、音频 CD 或 DVD 视频菜单。
+
+任务会在保存位置所在卷暂存数据，因此需要同时容纳暂存内容和最终镜像的空间；创建期间请勿修改源文件。镜像成功后才替换已有目标文件，失败或取消会清理临时文件并保留旧目标。进度未由系统提供时显示不定进度，不虚构百分比。镜像任务和刻录互斥，运行期间阻止空闲睡眠和退出，等待取消清理结束后才能开始下一任务。
+
+### 镜像刻录
+
 - 实际刻录使用 `DRBurn`，不是命令行输出模拟；设备插拔、介质变化和刻录进度通过 `DRNotificationCenter` 接收。
 - 支持 CD、DVD、BD 的程度取决于 macOS、光驱与介质。只有 DiscRecording 成功解析的镜像才可写入。CUE/TOC 引用的数据文件必须存在且可读。
 - 刻录前检查设备、空白介质、容量、速度以及主镜像文件的大小、修改时间和文件标识。CUE/TOC 引用的数据文件不会被复制；从选择到校验结束请保持所有源文件不变且可读。
@@ -46,14 +66,16 @@ swift test --arch arm64     # 核心单元测试；ISO 集成测试需 BR_TEST_I
 swift build --arch arm64    # SwiftPM 开发构建
 ```
 
-测试覆盖容量边界、非空白介质、设备不可用、速度变化、缺失/异常读数、校验状态、演示隔离、取消以及真实 ISO 布局解析。硬件验收步骤见 [docs/VALIDATION.md](docs/VALIDATION.md)。
+测试覆盖刻录预检查、遥测、演示隔离、真实 ISO 布局解析，以及 ISO/UDF 构建后挂载与文件比对、虚拟数据盘的 ISO/CDR/DMG 复制、同名与路径冲突、文件系统限制、覆盖保存、失败保留旧文件、取消与临时目录清理。测试不向物理光驱写入数据。硬件验收步骤见 [docs/VALIDATION.md](docs/VALIDATION.md)。
 
 ## 结构
 
 - `Sources/BR`：SwiftUI 工作台、文件面板、退出保护。
-- `Sources/BRCore`：可观察任务状态、预检查、遥测值与演示引擎。
+- `Sources/BRCore`：可观察任务状态、预检查、遥测、演示引擎，以及后台镜像构建与可取消的系统工具执行。
 - `Sources/DiscBridge`：Objective-C DiscRecording 适配器，隔离遗留 API 与异常；镜像解析在后台执行，回调固定在主线程。
 - `Tests/BRCoreTests`：Swift Testing 测试。
 - `Scripts`：编译、启动、测试及原生图标生成脚本。
 
 底层接口以 Xcode SDK 的 `DiscRecording.framework/Headers` 中的 `DRBurn.h`、`DRBurn_ContentSupport.h`、`DRTrack.h`、`DRDevice.h`、`DRStatus.h` 为依据。
+
+ISO/CDR 复制依据 `diskutil info -plist` 报告的设备大小完整读取扇区，不省略尾部填充；DMG 会在读取完成后压缩。镜像工具参数以本机 `man hdiutil` 为依据。为兼容 macOS 14，DMG 压缩使用 `hdiutil convert`（较新 macOS 推荐 `diskutil image`，旧接口仍可用）。镜像格式说明参见 [Apple：使用磁盘工具创建磁盘映像](https://support.apple.com/zh-cn/guide/disk-utility/dskutl11888/mac)。

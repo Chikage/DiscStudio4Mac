@@ -4,6 +4,8 @@ import Observation
 
 @MainActor @Observable
 public final class BurnStore {
+    public var mode: StudioMode = .burn
+    public let imageCreation = ImageCreationStore()
     public private(set) var devices: [DiscDevice] = []
     public var selectedDeviceID: String = ""
     public private(set) var image: DiscImage?
@@ -29,7 +31,7 @@ public final class BurnStore {
     public init() {}
 
     public var selectedDevice: DiscDevice? { devices.first { $0.id == selectedDeviceID } }
-    public var isBusy: Bool { snapshot.phase.isActive }
+    public var isBusy: Bool { snapshot.phase.isActive || imageCreation.isBusy }
     public var preflightIssue: String? { BurnPreflight.issue(image: image, device: selectedDevice, options: options) }
     public var canBurn: Bool { !isDemo && !isBusy && !isLoadingImage && preflightIssue == nil }
 
@@ -61,6 +63,27 @@ public final class BurnStore {
     }
 
     public func refreshDevices() { if !isDemo { engine.refreshDevices() } }
+
+    public func createImage(to destination: URL) {
+        guard !isBusy, !isDemo, !isLoadingImage else { return }
+        switch mode {
+        case .burn: return
+        case .buildISO: imageCreation.build(to: destination)
+        case .copyDisc:
+            // Refresh synchronously immediately before resolving the source device.
+            let sourceID = selectedDeviceID
+            engine.refreshDevices()
+            guard selectedDeviceID == sourceID else {
+                imageCreation.errorMessage = "来源光驱已断开，请重新选择。"
+                return
+            }
+            if let issue = ImagePreflight.copyIssue(device: selectedDevice) {
+                imageCreation.errorMessage = issue
+            } else if let device = selectedDevice {
+                imageCreation.copyDisc(device, to: destination)
+            }
+        }
+    }
 
     public func selectImage(_ url: URL) {
         guard !isBusy, !isDemo else { return }
@@ -121,7 +144,7 @@ public final class BurnStore {
     }
 
     public func cancel() {
-        guard isBusy, !snapshot.cancelling else { return }
+        guard snapshot.phase.isActive, !snapshot.cancelling else { return }
         snapshot.cancelling = true
         appendLog("已请求停止，等待刻录引擎完成清理。")
         if isDemo {
@@ -198,6 +221,7 @@ public final class BurnStore {
     /// This path never invokes DRBurn, even with physical drives connected.
     public func startDemo() {
         guard !isBusy, !isLoadingImage else { return }
+        mode = .burn
         isDemo = true
         image = DiscImage(
             url: URL(fileURLWithPath: "/演示/Archive-2026.iso"),
@@ -208,6 +232,7 @@ public final class BurnStore {
             DiscDevice(dictionary: [
                 "id": "demo", "name": "演示刻录机", "media": "DVD-R",
                 "present": true, "blank": true, "busy": false, "freeBlocks": 2_298_496,
+                "canWrite": true,
                 "speeds": [5540.0, 11080.0], "baseSpeed": 1385.0,
                 "bufferCapacity": 2_097_152, "underrunProtection": true,
             ])

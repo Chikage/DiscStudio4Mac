@@ -58,7 +58,11 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
         @"id": device.ioRegistryEntryPath ?: @"", @"name": device.displayName ?: @"光盘驱动器",
         @"media": device.mediaType ?: @"未插入光盘", @"present": @(device.mediaIsPresent),
         @"blank": @(device.mediaIsBlank), @"busy": @(device.mediaIsBusy || device.mediaIsTransitioning),
+        @"canWrite": capabilities[DRDeviceCanWriteKey] ?: @NO,
         @"freeBlocks": media[DRDeviceMediaBlocksFreeKey] ?: @0,
+        @"mediaBSDName": media[DRDeviceMediaBSDNameKey] ?: @"",
+        @"mediaTrackCount": media[DRDeviceMediaTrackCountKey] ?: @0,
+        @"mediaSessionCount": media[DRDeviceMediaSessionCountKey] ?: @0,
         @"speeds": status[DRDeviceBurnSpeedsKey] ?: @[], @"baseSpeed": @(base)
     } mutableCopy];
     NSDictionary *hardwareKeys = @{
@@ -98,8 +102,7 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
 - (void)refreshDevices {
     NSMutableArray *devices = [NSMutableArray array];
     for (DRDevice *device in DRDevice.devices) {
-        NSDictionary *capabilities = device.info[DRDeviceWriteCapabilitiesKey];
-        if (device.isValid && [capabilities[DRDeviceCanWriteKey] boolValue]) {
+        if (device.isValid) {
             [devices addObject:[self snapshot:device]];
         }
     }

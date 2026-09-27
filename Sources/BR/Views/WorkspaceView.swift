@@ -7,6 +7,29 @@ struct WorkspaceView: View {
     @State private var confirmCancel = false
 
     var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Disc Studio").font(.headline)
+                Spacer()
+                Picker("工作模式", selection: $store.mode) {
+                    ForEach(StudioMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 420)
+                .disabled(store.isBusy || store.isLoadingImage || store.isDemo)
+                Spacer()
+            }.padding(.horizontal, 24).padding(.vertical, 12).background(.bar)
+            Divider()
+            if store.mode == .burn {
+                burnWorkspace
+            } else {
+                ImageWorkspaceView(store: store)
+            }
+        }
+        .frame(minWidth: 1050, minHeight: 530)
+        .tint(StudioStyle.accent)
+    }
+
+    private var burnWorkspace: some View {
         HStack(spacing: 0) {
             SetupView(store: store)
             Divider()

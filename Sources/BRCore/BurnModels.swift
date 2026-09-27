@@ -26,6 +26,7 @@ public struct DiscDevice: Identifiable, Sendable, Equatable {
     public let present: Bool
     public let blank: Bool
     public let busy: Bool
+    public let canWrite: Bool
     public let freeBlocks: UInt64
     public let speeds: [Double]
     public let baseSpeed: Double
@@ -37,6 +38,9 @@ public struct DiscDevice: Identifiable, Sendable, Equatable {
     public let interconnect: String?
     public let location: String?
     public let writableMedia: [String]
+    public let mediaBSDName: String?
+    public let mediaTrackCount: Int
+    public let mediaSessionCount: Int
 
     public init(dictionary: [String: Any]) {
         id = dictionary["id"] as? String ?? ""
@@ -45,6 +49,7 @@ public struct DiscDevice: Identifiable, Sendable, Equatable {
         present = dictionary["present"] as? Bool ?? false
         blank = dictionary["blank"] as? Bool ?? false
         busy = dictionary["busy"] as? Bool ?? false
+        canWrite = dictionary["canWrite"] as? Bool ?? false
         freeBlocks = (dictionary["freeBlocks"] as? NSNumber)?.uint64Value ?? 0
         speeds = Array(
             Set(
@@ -61,6 +66,9 @@ public struct DiscDevice: Identifiable, Sendable, Equatable {
         interconnect = Self.hardwareText(dictionary["interconnect"])
         location = Self.hardwareText(dictionary["location"])
         writableMedia = (dictionary["writableMedia"] as? [String] ?? []).compactMap(Self.hardwareText)
+        mediaBSDName = Self.hardwareText(dictionary["mediaBSDName"])
+        mediaTrackCount = (dictionary["mediaTrackCount"] as? NSNumber)?.intValue ?? 0
+        mediaSessionCount = (dictionary["mediaSessionCount"] as? NSNumber)?.intValue ?? 0
     }
 
     private static func hardwareText(_ value: Any?) -> String? {
@@ -215,6 +223,7 @@ public enum BurnPreflight {
     public static func issue(image: DiscImage?, device: DiscDevice?, options: BurnOptions) -> String? {
         guard let image else { return "选择一个光盘镜像以开始。" }
         guard let device else { return "连接 USB 或内置光盘刻录机。" }
+        guard device.canWrite else { return "所选光驱不支持刻录，请选择刻录机。" }
         guard !device.busy else { return "设备正忙，请稍后重试。" }
         guard device.present else { return "请插入空白可写光盘。" }
         guard device.blank else { return "光盘已有数据，请更换空白光盘。" }

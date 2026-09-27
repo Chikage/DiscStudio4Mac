@@ -16,7 +16,7 @@ struct BurnTests {
     private func device(_ changes: [String: Any] = [:]) -> DiscDevice {
         var values: [String: Any] = [
             "id": "test", "name": "Test", "present": true,
-            "blank": true, "busy": false, "freeBlocks": 100, "speeds": [5540.0],
+            "blank": true, "busy": false, "canWrite": true, "freeBlocks": 100, "speeds": [5540.0],
         ]
         values.merge(changes) { _, new in new }
         return DiscDevice(dictionary: values)
@@ -31,7 +31,7 @@ struct BurnTests {
     @Test func rejectsMissingBusyAndUsedMedia() {
         #expect(BurnPreflight.issue(image: nil, device: device(), options: BurnOptions()) != nil)
         #expect(BurnPreflight.issue(image: image(), device: nil, options: BurnOptions()) != nil)
-        for values in [["busy": true], ["blank": false], ["present": false]] {
+        for values in [["busy": true], ["blank": false], ["present": false], ["canWrite": false]] {
             #expect(BurnPreflight.issue(image: image(), device: device(values), options: BurnOptions()) != nil)
         }
     }
