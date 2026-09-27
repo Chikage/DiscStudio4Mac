@@ -64,7 +64,7 @@ struct SpeedChartView: View {
 
     private var sourceDescription: String {
         if store.isDemo { return isReading ? "模拟读数 · 根据校验进度估算" : "模拟读数" }
-        return isReading ? "根据校验进度估算 · 1 MB = 1,000,000 字节" : "设备实时报告 · 1 MB = 1,000,000 字节"
+        return ""
     }
 }
 

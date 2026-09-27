@@ -37,7 +37,7 @@ struct WorkspaceView: View {
                 footer
             }.background(StudioStyle.background)
         }
-        .frame(minWidth: 1050, minHeight: 720)
+        .frame(minWidth: 1050, minHeight: 480)
         .tint(StudioStyle.accent)
         .alert("开始写入光盘？", isPresented: $confirmBurn) {
             Button("取消", role: .cancel) {}
@@ -215,3 +215,4 @@ struct DeviceInfoView: View {
 
 #Preview("Light") { WorkspaceView(store: BurnStore()).preferredColorScheme(.light) }
 #Preview("Dark") { WorkspaceView(store: BurnStore()).preferredColorScheme(.dark) }
+#Preview("Compact") { WorkspaceView(store: BurnStore()).frame(width: 1050, height: 480) }

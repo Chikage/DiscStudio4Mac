@@ -1,6 +1,6 @@
 # Disc Studio · 光盘刻录工作台
 
-macOS 原生光盘镜像刻录应用，SwiftUI + Swift 6 + Apple DiscRecording。最低 macOS 14，支持 Apple Silicon 和 Intel Mac。界面使用简体中文，自动适配系统明暗主题，也可在「显示 → 外观」中选择。
+macOS 原生光盘镜像刻录应用，SwiftUI + Swift 6 + Apple DiscRecording。最低 macOS 14，仅支持 Apple Silicon（arm64），不再支持 Intel Mac。界面使用简体中文，自动适配系统明暗主题，也可在「显示 → 外观」中选择。
 
 ## 运行
 
@@ -11,7 +11,7 @@ macOS 原生光盘镜像刻录应用，SwiftUI + Swift 6 + Apple DiscRecording�
 ./Scripts/run.sh
 ```
 
-需要 Xcode 16 或更新版本。项目已包含 `BR.xcodeproj`，可直接用 Xcode 打开并运行。若修改 `project.yml`，用 XcodeGen 执行 `xcodegen generate`。应用为本地临时签名版本；面向其他用户分发前需要 Developer ID 签名与公证。
+需要 Xcode 16 或更新版本。项目已包含 `BR.xcodeproj`，可直接用 Xcode 打开并运行。Debug、Release 和打包脚本均仅构建 arm64。若修改 `project.yml`，用 XcodeGen 执行 `xcodegen generate`。应用为本地临时签名版本；面向其他用户分发前需要 Developer ID 签名与公证。
 
 无需光盘即可体验完整的演示流程：点击右上角「界面演示」。演示会标明模拟数据，与真实刻录路径完全分开。命令行也可运行 `./Scripts/run.sh --demo`（需先退出已有实例）。
 
@@ -42,8 +42,8 @@ macOS 原生光盘镜像刻录应用，SwiftUI + Swift 6 + Apple DiscRecording�
 
 ```sh
 ./Scripts/test.sh           # 生成 ISO 测试镜像并运行全部测试，不写入光驱
-swift test                 # 核心单元测试；ISO 集成测试需 BR_TEST_IMAGE 环境变量
-swift build                # SwiftPM 开发构建
+swift test --arch arm64     # 核心单元测试；ISO 集成测试需 BR_TEST_IMAGE 环境变量
+swift build --arch arm64    # SwiftPM 开发构建
 ```
 
 测试覆盖容量边界、非空白介质、设备不可用、速度变化、缺失/异常读数、校验状态、演示隔离、取消以及真实 ISO 布局解析。硬件验收步骤见 [docs/VALIDATION.md](docs/VALIDATION.md)。

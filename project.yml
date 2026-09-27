@@ -6,6 +6,8 @@ options:
   developmentLanguage: zh-Hans
 settings:
   base:
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: NO
     SWIFT_VERSION: '6.0'
     SWIFT_STRICT_CONCURRENCY: complete
     MACOSX_DEPLOYMENT_TARGET: '14.0'

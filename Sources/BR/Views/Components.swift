@@ -63,11 +63,12 @@ struct MetricView: View {
 struct KeyValueRow: View {
     let label: String
     let value: String
+    var valueColor: Color = .primary
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label).foregroundStyle(.secondary)
             Spacer(minLength: 12)
-            Text(value).multilineTextAlignment(.trailing)
+            Text(value).foregroundStyle(valueColor).multilineTextAlignment(.trailing)
         }.font(.subheadline)
     }
 }
