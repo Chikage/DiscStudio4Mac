@@ -81,11 +81,21 @@ struct ImageWorkspaceView: View {
                 Text(job.status.phase.title).font(.title3.weight(.semibold))
                 Spacer()
                 if let progress = job.status.progress {
-                    Text(progress, format: .percent.precision(.fractionLength(0))).monospacedDigit()
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text(progress, format: .percent.precision(.fractionLength(0))).monospacedDigit()
+                        if job.status.phase.isActive {
+                            Text(job.status.isProgressEstimated ? "当前阶段 · 估算" : "当前阶段")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
             ProgressView(value: job.status.progress ?? (job.isBusy ? nil : 0))
                 .accessibilityLabel("当前镜像任务进度")
+                .accessibilityValue(
+                    job.status.progress.map {
+                        "\(job.status.isProgressEstimated ? "估算 " : "")\(Int($0 * 100)) 百分比"
+                    } ?? "正在计算")
             Text(job.status.detail).font(.subheadline).foregroundStyle(.secondary)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -103,6 +113,12 @@ struct ImageWorkspaceView: View {
             if job.isBusy && job.status.progress == nil {
                 Text("当前阶段未提供百分比，请等待系统完成。")
                     .font(.caption).foregroundStyle(.secondary)
+            } else if job.isBusy {
+                Text(
+                    job.status.isProgressEstimated
+                        ? "按已生成镜像大小估算，系统完成构建后才会保存。"
+                        : "显示当前阶段的进度，进入下一阶段时重新计量。"
+                ).font(.caption).foregroundStyle(.secondary)
             }
         }
     }

@@ -5,7 +5,8 @@ import Foundation
 actor ImageCommandRunner {
     func run(
         _ executable: String, arguments: [String],
-        progress: @Sendable (Double?) async -> Void = { _ in }
+        progress: @Sendable (Double?) async -> Void = { _ in },
+        poll: @Sendable () async -> Void = {}
     ) async throws -> Data {
         try Task.checkCancellation()
         let log = FileManager.default.temporaryDirectory.appendingPathComponent("DiscStudio-command-\(UUID()).log")
@@ -44,10 +45,17 @@ actor ImageCommandRunner {
                 }
                 if pending.count > 8192 { pending = String(pending.suffix(8192)) }
                 try Task.checkCancellation()
+                await poll()
                 if !process.isRunning { break }
                 try await Task.sleep(for: .milliseconds(150))
             } while true
-            output.append(try reader.readToEnd() ?? Data())
+            let finalData = try reader.readToEnd() ?? Data()
+            output.append(finalData)
+            pending += String(decoding: finalData, as: UTF8.self)
+            for line in pending.split(whereSeparator: \.isNewline) {
+                if let value = Self.percentage(String(line)) { await progress(value < 0 ? nil : value) }
+            }
+            try Task.checkCancellation()
         } catch {
             if process.isRunning { process.terminate() }
             // Await exit before removing staging files or reporting that cancellation finished.

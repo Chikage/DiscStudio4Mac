@@ -61,10 +61,36 @@ public struct ImageUpdate: Sendable {
     public let phase: ImagePhase
     public let detail: String
     public let progress: Double?
-    public init(_ phase: ImagePhase, _ detail: String, progress: Double? = nil) {
+    public let isProgressEstimated: Bool
+    public init(_ phase: ImagePhase, _ detail: String, progress: Double? = nil, isProgressEstimated: Bool = false) {
         self.phase = phase
         self.detail = detail
         self.progress = progress
+        self.isProgressEstimated = isProgressEstimated
+    }
+}
+
+/// makehybrid reports an upper bound in 2048-byte sectors, not a progress stream.
+struct ImageSizeEstimate: Sendable {
+    let bytes: Int64
+
+    init?(output: Data) {
+        for line in String(decoding: output, as: UTF8.self).split(whereSeparator: \.isNewline) {
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 2, fields[1].hasPrefix("(0x"),
+                let sectors = Int64(fields[0]), sectors > 0
+            else { continue }
+            let size = sectors.multipliedReportingOverflow(by: 2048)
+            guard !size.overflow else { return nil }
+            bytes = size.partialValue
+            return
+        }
+        return nil
+    }
+
+    func progress(writtenBytes: Int64) -> Double {
+        // Allocation/size is only an estimate of work done; process success decides completion.
+        min(0.99, max(0, Double(writtenBytes) / Double(bytes)))
     }
 }
 

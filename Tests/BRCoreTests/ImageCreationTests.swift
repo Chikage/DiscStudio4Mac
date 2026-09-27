@@ -46,6 +46,28 @@ struct ImageCreationTests {
         #expect(ImageCommandRunner.percentage("created: /tmp/100.iso") == nil)
     }
 
+    @Test func constructionEstimateUsesSectorsAndWaitsForProcessSuccess() throws {
+        let estimate = try #require(ImageSizeEstimate(output: Data("notice\n262321 (0x000000000400b1) sectors\n".utf8)))
+        #expect(estimate.bytes == 537_233_408)
+        #expect(estimate.progress(writtenBytes: 0) == 0)
+        #expect(estimate.progress(writtenBytes: estimate.bytes / 2) == 0.5)
+        #expect(estimate.progress(writtenBytes: estimate.bytes) == 0.99)
+        #expect(estimate.progress(writtenBytes: .max) == 0.99)
+        for output in ["not a size", "0 (0x0) sectors", "9223372036854775807 (0x7fffffffffffffff) sectors"] {
+            #expect(ImageSizeEstimate(output: Data(output.utf8)) == nil)
+        }
+    }
+
+    @Test func commandProgressIncludesFinalUnterminatedOutput() async throws {
+        let recorder = ImageUpdateRecorder()
+        _ = try await ImageCommandRunner().run(
+            "/usr/bin/printf", arguments: ["PERCENT:10\rPERCENT:42"]
+        ) { progress in
+            await recorder.record(ImageUpdate(.building, "Compression", progress: progress))
+        }
+        #expect(await recorder.values.map(\.progress) == [0.1, 0.42])
+    }
+
     @Test func processCancellationWaitsForExit() async throws {
         let runner = ImageCommandRunner()
         let task = Task { try await runner.run("/bin/sleep", arguments: ["30"]) }
@@ -88,6 +110,45 @@ struct ImageFileIntegrationTests {
         let url = files.temporaryDirectory.appendingPathComponent("DiscStudio-test-\(UUID())", isDirectory: true)
         try files.createDirectory(at: url, withIntermediateDirectories: false)
         return url
+    }
+
+    @Test func buildingReportsByteProgressThenEstimatedImageProgress() async throws {
+        let root = try temporaryDirectory()
+        defer { try? files.removeItem(at: root) }
+        let source = root.appendingPathComponent("large.bin")
+        try Data(repeating: 0xA5, count: 10 * 1_048_576).write(to: source)
+        let recorder = ImageUpdateRecorder()
+        try await ImageFileService().build(
+            sources: [source], volumeName: "Progress", fileSystem: .isoJoliet,
+            destination: root.appendingPathComponent("result.iso")
+        ) { await recorder.record($0) }
+        let updates = await recorder.values
+        let staging = updates.filter { $0.phase == .copying }
+        #expect(staging.first?.progress == 0)
+        #expect(staging.contains { $0.progress == 0.1 })
+        #expect(staging.last?.progress == 1)
+        #expect(staging.allSatisfy { !$0.isProgressEstimated })
+        let building = updates.filter { $0.phase == .building && $0.progress != nil }
+        #expect(!building.isEmpty)
+        #expect(building.allSatisfy { $0.isProgressEstimated && (0...0.99).contains($0.progress ?? -1) })
+        #expect(building.contains { ($0.progress ?? 0) > 0 && $0.detail.contains("预计") })
+        #expect(updates.last?.phase == .finishing)
+    }
+
+    @Test func zeroByteSelectionFinishesStagingWithoutInvalidProgress() async throws {
+        let root = try temporaryDirectory()
+        defer { try? files.removeItem(at: root) }
+        let source = root.appendingPathComponent("empty folder")
+        try files.createDirectory(at: source, withIntermediateDirectories: false)
+        try Data().write(to: source.appendingPathComponent("empty.txt"))
+        let recorder = ImageUpdateRecorder()
+        try await ImageFileService().build(
+            sources: [source], volumeName: "Empty", fileSystem: .udf,
+            destination: root.appendingPathComponent("empty.iso")
+        ) { await recorder.record($0) }
+        let updates = await recorder.values
+        #expect(updates.filter { $0.phase == .copying }.last?.progress == 1)
+        #expect(updates.compactMap(\.progress).allSatisfy { $0.isFinite && (0...1).contains($0) })
     }
 
     @Test func generatedISOAndUDFMountWithExactFileContents() async throws {
@@ -265,4 +326,9 @@ struct ImageFileIntegrationTests {
         #expect(!files.fileExists(atPath: output.path))
         #expect(try files.contentsOfDirectory(atPath: root.path) == ["source.txt"])
     }
+}
+
+private actor ImageUpdateRecorder {
+    private(set) var values: [ImageUpdate] = []
+    func record(_ update: ImageUpdate) { values.append(update) }
 }

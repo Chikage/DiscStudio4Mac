@@ -15,27 +15,122 @@ actor ImageFileService {
         let staging = work.appendingPathComponent("content", isDirectory: true)
         try files.createDirectory(at: staging, withIntermediateDirectories: false)
         await update(ImageUpdate(.preparing, "检查文件可读性与文件系统限制…"))
-        for source in sources { try validateTree(source, fileSystem: fileSystem) }
-        for (index, source) in sources.enumerated() {
-            try Task.checkCancellation()
-            await update(ImageUpdate(.copying, "暂存 \(index + 1)/\(sources.count)：\(source.lastPathComponent)"))
-            _ = try await commands.run(
-                "/usr/bin/ditto",
-                arguments: [
-                    "--norsrc", "--noextattr", "--noacl", source.path,
-                    staging.appendingPathComponent(source.lastPathComponent).path,
-                ])
+        var entries: [StagingEntry] = []
+        for source in sources {
+            // Directory enumeration canonicalizes ancestors such as /var → /private/var.
+            let rootComponents = source.resolvingSymlinksInPath().pathComponents
+            for item in try validateTree(source, fileSystem: fileSystem) {
+                let values = try item.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                let components = item.resolvingSymlinksInPath().pathComponents
+                guard components.starts(with: rootComponents) else {
+                    throw ImageCreationError("源文件夹路径发生变化，请重新添加：\(source.lastPathComponent)")
+                }
+                let relativePath = ([source.lastPathComponent] + components.dropFirst(rootComponents.count))
+                    .joined(separator: "/")
+                entries.append(
+                    StagingEntry(
+                        source: item, destination: staging.appendingPathComponent(relativePath),
+                        isDirectory: values.isDirectory == true,
+                        bytes: values.isDirectory == true ? 0 : Int64(values.fileSize ?? 0)))
+            }
         }
-        // Validate the actual snapshot too, including files created while the sources were copied.
-        try validateTree(staging, fileSystem: fileSystem)
+        try await stage(entries, fileSystem: fileSystem, update: update)
+        // Validate the completed snapshot before passing it to the image builder.
+        _ = try validateTree(staging, fileSystem: fileSystem)
         let image = work.appendingPathComponent("image.iso")
-        await update(ImageUpdate(.building, "正在构建 \(fileSystem.title) 镜像…"))
+        let layoutArguments =
+            [staging.path] + fileSystem.arguments
+            + ["-default-volume-name", volumeName.trimmingCharacters(in: .whitespacesAndNewlines)]
+        await update(ImageUpdate(.building, "正在计算镜像布局与预计大小…"))
+        let estimateOutput = try await commands.run(
+            "/usr/bin/hdiutil", arguments: ["makehybrid", "-print-size"] + layoutArguments)
+        let estimate = ImageSizeEstimate(output: estimateOutput)
         _ = try await commands.run(
             "/usr/bin/hdiutil",
-            arguments: ["makehybrid", "-o", image.path, staging.path] + fileSystem.arguments
-                + ["-default-volume-name", volumeName.trimmingCharacters(in: .whitespacesAndNewlines)]
+            arguments: ["makehybrid", "-o", image.path] + layoutArguments,
+            poll: {
+                let attributes = try? FileManager.default.attributesOfItem(atPath: image.path)
+                let written = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+                let total = estimate.map { " / 预计 \(BurnFormat.bytes($0.bytes))" } ?? ""
+                await update(
+                    ImageUpdate(
+                        .building, "已生成 \(BurnFormat.bytes(written))\(total)",
+                        progress: estimate?.progress(writtenBytes: written), isProgressEstimated: estimate != nil))
+            }
         )
         try await publish(image, to: destination, update: update)
+    }
+
+    private struct StagingEntry {
+        let source: URL
+        let destination: URL
+        let isDirectory: Bool
+        let bytes: Int64
+    }
+
+    private func stage(
+        _ entries: [StagingEntry], fileSystem: DataDiscFileSystem,
+        update: @Sendable (ImageUpdate) async -> Void
+    ) async throws {
+        let totalBytes = try entries.reduce(Int64(0)) { total, entry in
+            let sum = total.addingReportingOverflow(entry.bytes)
+            guard !sum.overflow else { throw ImageCreationError("所选文件的总大小超过支持范围。") }
+            return sum.partialValue
+        }
+        var copiedBytes: Int64 = 0
+        var lastUpdate = Date.distantPast
+        await update(ImageUpdate(.copying, "准备暂存 \(BurnFormat.bytes(totalBytes)) 数据…", progress: 0))
+        for entry in entries {
+            try Task.checkCancellation()
+            try validateItem(entry.source, fileSystem: fileSystem)
+            let attributes = try files.attributesOfItem(atPath: entry.source.path)
+            let expectedType: FileAttributeType = entry.isDirectory ? .typeDirectory : .typeRegular
+            guard attributes[.type] as? FileAttributeType == expectedType else {
+                throw ImageCreationError("源文件类型在检查后发生变化：\(entry.source.lastPathComponent)。请重新创建。")
+            }
+            if entry.isDirectory {
+                try files.createDirectory(at: entry.destination, withIntermediateDirectories: true)
+                continue
+            }
+            guard (attributes[.size] as? NSNumber)?.int64Value == entry.bytes else {
+                throw ImageCreationError("源文件在检查后发生变化：\(entry.source.lastPathComponent)。请重新创建。")
+            }
+            let input = try FileHandle(forReadingFrom: entry.source)
+            defer { try? input.close() }
+            guard files.createFile(atPath: entry.destination.path, contents: nil) else {
+                throw ImageCreationError("无法暂存文件：\(entry.source.lastPathComponent)")
+            }
+            let output = try FileHandle(forWritingTo: entry.destination)
+            defer { try? output.close() }
+            var remaining = entry.bytes
+            while remaining > 0 {
+                try Task.checkCancellation()
+                guard let data = try input.read(upToCount: Int(min(1_048_576, remaining))), !data.isEmpty else {
+                    throw ImageCreationError("源文件读取提前结束：\(entry.source.lastPathComponent)")
+                }
+                try output.write(contentsOf: data)
+                remaining -= Int64(data.count)
+                copiedBytes += Int64(data.count)
+                if Date().timeIntervalSince(lastUpdate) >= 0.15 {
+                    await update(
+                        ImageUpdate(
+                            .copying,
+                            "暂存 \(entry.source.lastPathComponent) · \(BurnFormat.bytes(copiedBytes)) / \(BurnFormat.bytes(totalBytes))",
+                            progress: totalBytes > 0 ? Double(copiedBytes) / Double(totalBytes) : 0))
+                    lastUpdate = .now
+                }
+            }
+            let current = try files.attributesOfItem(atPath: entry.source.path)
+            guard (current[.size] as? NSNumber)?.int64Value == entry.bytes,
+                current[.modificationDate] as? Date == attributes[.modificationDate] as? Date
+            else { throw ImageCreationError("源文件在复制期间发生变化：\(entry.source.lastPathComponent)。请重新创建。") }
+            // Keep ordinary file dates/modes; optical data images intentionally omit xattrs and resource forks.
+            try files.setAttributes(
+                attributes.filter { $0.key == .posixPermissions || $0.key == .modificationDate },
+                ofItemAtPath: entry.destination.path)
+        }
+        try Task.checkCancellation()
+        await update(ImageUpdate(.copying, "暂存完成 · \(BurnFormat.bytes(copiedBytes))", progress: 1))
     }
 
     func copyDisc(
@@ -144,8 +239,9 @@ actor ImageFileService {
         }
     }
 
-    private func validateTree(_ source: URL, fileSystem: DataDiscFileSystem) throws {
+    private func validateTree(_ source: URL, fileSystem: DataDiscFileSystem) throws -> [URL] {
         try validateItem(source, fileSystem: fileSystem)
+        var items = [source]
         if try source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
             // Throw on traversal errors instead of quietly omitting unreadable subdirectories.
             var traversalError: (any Error)?
@@ -159,9 +255,13 @@ actor ImageFileService {
                     }
                 )
             else { throw ImageCreationError("无法读取文件夹：\(source.lastPathComponent)") }
-            for case let item as URL in enumerator { try validateItem(item, fileSystem: fileSystem) }
+            for case let item as URL in enumerator {
+                try validateItem(item, fileSystem: fileSystem)
+                items.append(item)
+            }
             if let traversalError { throw traversalError }
         }
+        return items
     }
 
     private func validateItem(_ url: URL, fileSystem: DataDiscFileSystem) throws {
