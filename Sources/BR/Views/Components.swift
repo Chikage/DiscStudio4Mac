@@ -45,6 +45,23 @@ struct StatusPill: View {
     }
 }
 
+struct AppVersionView: View {
+    private let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+
+    var body: some View {
+        Group {
+            if let version {
+                Text("版本 \(version)")
+            } else {
+                Text("开发版本")
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+    }
+}
+
 struct MetricView: View {
     let title: String
     let value: String

@@ -105,7 +105,7 @@ public struct DiscImage: Sendable {
     }
 }
 
-public struct BurnOptions: Sendable {
+public struct BurnOptions: Sendable, Equatable {
     public var speed: Double = 0
     public var finalize = true
     public var verify = true
@@ -149,17 +149,17 @@ public struct BurnSnapshot: Sendable {
 
 public struct SpeedSample: Identifiable, Sendable {
     public let id = UUID()
-    public let seconds: Double
+    public let progress: Double
     public let megabytesPerSecond: Double
-    public init(seconds: Double, megabytesPerSecond: Double) {
-        self.seconds = seconds
+    public init(progress: Double, megabytesPerSecond: Double) {
+        self.progress = progress
         self.megabytesPerSecond = megabytesPerSecond
     }
 }
 
 public struct SpeedHistory: Sendable {
-    public static let windowDuration: TimeInterval = 60
     public private(set) var phase: BurnPhase = .writing
+    public private(set) var progress: Double?
     public private(set) var samples: [SpeedSample] = []
 
     public init() {}
@@ -167,18 +167,41 @@ public struct SpeedHistory: Sendable {
     public mutating func beginPhase(_ phase: BurnPhase) {
         guard phase == .writing || phase == .verifying, phase != self.phase else { return }
         self.phase = phase
+        progress = nil
         samples = []
     }
 
-    public mutating func append(_ sample: SpeedSample) {
-        samples.append(sample)
-        samples.removeAll { $0.seconds < sample.seconds - Self.windowDuration }
+    public mutating func record(progress: Double?, megabytesPerSecond: Double?) {
+        guard let progress, progress.isFinite, (0...1).contains(progress) else { return }
+        // A device can restart its progress for a new track. Never connect that reset backwards.
+        if let previous = self.progress, progress < previous { samples = [] }
+        self.progress = progress
+        guard let megabytesPerSecond, megabytesPerSecond.isFinite, megabytesPerSecond >= 0 else { return }
+        let sample = SpeedSample(progress: progress, megabytesPerSecond: megabytesPerSecond)
+        // Keep the entire phase at 0.1% resolution, bounded even during hours of frequent updates.
+        // Each retained point uses its actual reported progress, not the bucket boundary.
+        if let last = samples.last, Int(last.progress * 1000) == Int(progress * 1000),
+            samples.count > 1 || last.progress == progress
+        {
+            samples[samples.count - 1] = sample
+        } else {
+            samples.append(sample)
+        }
     }
 
-    public func samples(at seconds: TimeInterval) -> [SpeedSample] {
-        let window = (seconds - Self.windowDuration)...seconds
-        return samples.filter { window.contains($0.seconds) }
+    public mutating func record(_ measurement: VerificationSpeedMeasurement) {
+        let speed = measurement.kilobytesPerSecond / 1000
+        // The first average measures this whole interval, including its starting progress.
+        if samples.isEmpty {
+            record(progress: measurement.progressRange.lowerBound, megabytesPerSecond: speed)
+        }
+        record(progress: measurement.progressRange.upperBound, megabytesPerSecond: speed)
     }
+}
+
+public struct VerificationSpeedMeasurement: Sendable {
+    public let progressRange: ClosedRange<Double>
+    public let kilobytesPerSecond: Double
 }
 
 /// DiscRecording exposes write speed only. Estimate verification throughput from progress instead.
@@ -188,13 +211,16 @@ public struct VerificationSpeedEstimator: Sendable {
 
     public init() {}
 
-    public mutating func update(_ snapshot: BurnSnapshot, totalBytes: Int64, at seconds: TimeInterval) {
+    @discardableResult
+    public mutating func update(
+        _ snapshot: BurnSnapshot, totalBytes: Int64, at seconds: TimeInterval
+    ) -> VerificationSpeedMeasurement? {
         guard snapshot.phase == .verifying, !snapshot.cancelling,
             let progress = snapshot.progress, progress.isFinite, (0...1).contains(progress),
             totalBytes > 0, seconds.isFinite, seconds >= 0
         else {
             self = Self()
-            return
+            return nil
         }
         let current = (progress: progress, seconds: seconds, track: snapshot.track, bytes: totalBytes)
         guard let baseline, baseline.track == snapshot.track, baseline.bytes == totalBytes,
@@ -202,13 +228,31 @@ public struct VerificationSpeedEstimator: Sendable {
         else {
             self.baseline = current
             kilobytesPerSecond = nil
-            return
+            return nil
         }
         // Accumulate at least one second so closely spaced notifications do not produce spikes.
         let interval = seconds - baseline.seconds
-        guard interval >= 1 else { return }
-        kilobytesPerSecond = (progress - baseline.progress) * Double(totalBytes) / interval / 1000
-        self.baseline = current
+        guard interval >= 1 else { return nil }
+        return measure(progress: progress, at: seconds)
+    }
+
+    /// A successful verification completes the last interval even if its final callback is under a second away.
+    public mutating func finish(totalBytes: Int64, at seconds: TimeInterval) -> VerificationSpeedMeasurement? {
+        guard let baseline, baseline.bytes == totalBytes, baseline.progress < 1,
+            seconds.isFinite, seconds > baseline.seconds
+        else { return nil }
+        return measure(progress: 1, at: seconds)
+    }
+
+    private mutating func measure(progress: Double, at seconds: TimeInterval) -> VerificationSpeedMeasurement? {
+        guard let baseline, seconds > baseline.seconds else { return nil }
+        let speed = (progress - baseline.progress) * Double(baseline.bytes) / (seconds - baseline.seconds) / 1000
+        guard speed.isFinite else { return nil }
+        let measurement = VerificationSpeedMeasurement(
+            progressRange: baseline.progress...progress, kilobytesPerSecond: speed)
+        kilobytesPerSecond = speed
+        self.baseline = (progress, seconds, baseline.track, baseline.bytes)
+        return measurement
     }
 }
 

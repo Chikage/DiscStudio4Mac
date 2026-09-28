@@ -191,6 +191,9 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
     }
     if (failure) { if (error) *error = BRError(failure); return NO; }
     @try {
+        // Each burn session owns its layout, notification observer and sleep assertion.
+        // Session engines need burn notifications without observing the device inventory.
+        if (!self.center) self.center = [DRNotificationCenter currentRunLoopCenter];
         DRBurn *burn = [[DRBurn alloc] initWithDevice:device];
         [burn setProperties:@{DRBurnRequestedSpeedKey: @(speed > 0 ? speed : DRDeviceBurnSpeedMax),
                               DRBurnAppendableKey: @(!finalize), DRBurnVerifyDiscKey: @(verify),

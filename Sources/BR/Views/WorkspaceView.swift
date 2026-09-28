@@ -4,7 +4,10 @@ import SwiftUI
 struct WorkspaceView: View {
     @Bindable var store: BurnStore
     @State private var confirmBurn = false
+    @State private var sharedImage: SharedImageSelection?
     @State private var confirmCancel = false
+    @State private var pendingBurns: [BurnRequest] = []
+    @State private var cancelSession: BurnSession?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,37 +47,37 @@ struct WorkspaceView: View {
                                 .padding(12).background(
                                     StudioStyle.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
                         }
+                        if store.sessions.count > 1 { sessionOverview }
+                        BurnTelemetryView(store: store.selectedSession)
+                            .fixedSize(horizontal: false, vertical: true)
                         HStack(alignment: .top, spacing: 18) {
-                            SpeedChartView(store: store).frame(maxWidth: .infinity)
-                            CurrentProgressView(store: store).frame(width: 250)
-                        }
-                        .fixedSize(horizontal: false, vertical: true)
-                        HStack(alignment: .top, spacing: 18) {
-                            LogView(store: store).frame(maxWidth: .infinity)
+                            LogView(store: store.selectedSession).frame(maxWidth: .infinity)
                             DeviceInfoView(device: store.selectedDevice, isDemo: store.isDemo)
                                 .frame(width: 250)
                         }
                         .fixedSize(horizontal: false, vertical: true)
-                    }.padding(24).padding(.top, 0)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 24)
                 }
                 footer
             }.background(StudioStyle.background)
         }
         .frame(minWidth: 1050, minHeight: 480)
         .tint(StudioStyle.accent)
-        .alert("开始写入光盘？", isPresented: $confirmBurn) {
-            Button("取消", role: .cancel) {}
-            Button("开始刻录") { store.startBurn() }
-        } message: {
-            Text(
-                "镜像：\(store.image?.url.lastPathComponent ?? "")\n设备：\(store.selectedDevice?.name ?? "")\n写入：\(BurnFormat.bytes(store.image?.burnBytes ?? 0))\n封盘：\(store.options.finalize ? "是" : "否") · 校验：\(store.options.verify ? "是" : "否")\n开始后中断写入可能导致光盘无法使用。"
-            )
+        .sheet(item: $sharedImage) { selection in
+            SharedImageBurnView(store: store, image: selection.image)
+        }
+        .sheet(isPresented: $confirmBurn) {
+            BurnConfirmationView(requests: pendingBurns) { store.startBurns(pendingBurns) }
         }
         .alert("停止当前刻录？", isPresented: $confirmCancel) {
             Button("继续刻录", role: .cancel) {}
-            Button("停止刻录", role: .destructive) { store.cancel() }
+            Button("停止刻录", role: .destructive) { cancelSession?.cancel() }
         } message: {
-            Text(store.isDemo ? "将停止演示任务。" : "中断写入可能导致光盘无法使用。停止后请等待设备完成清理。")
+            Text(
+                "设备：\(cancelSession?.deviceName ?? "")\n"
+                    + (store.isDemo ? "将停止这台设备的演示任务。" : "中断写入可能导致光盘无法使用。停止后请等待设备完成清理。其他设备将继续刻录。"))
         }
         .alert(
             "操作未完成",
@@ -89,7 +92,9 @@ struct WorkspaceView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 6) {
-                Text("光盘刻录工作台").font(.title2.bold())
+                Text(store.label(for: store.selectedSession)).font(.title2.bold())
+                Text("\(store.activeBurnCount) 台正在刻录 · 每台设备可使用不同镜像")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             if store.isDemo {
@@ -105,25 +110,51 @@ struct WorkspaceView: View {
         }.padding(24)
     }
 
+    private var sessionOverview: some View {
+        StudioPanel(title: "设备任务", symbol: "opticaldiscdrive") {
+            HStack {
+                Text("点击设备查看进度、配置镜像或单独停止。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("启动所有就绪设备（\(store.readySessions.count)）") {
+                    pendingBurns = store.readySessions.compactMap(\.burnRequest)
+                    confirmBurn = true
+                }
+                .disabled(store.readySessions.isEmpty)
+            }
+            ForEach(store.sessions) { session in
+                BurnSessionRow(
+                    session: session, label: store.label(for: session), selected: session.id == store.selectedSession.id
+                ) {
+                    store.selectedDeviceID = session.deviceID
+                }
+            }
+        }
+    }
+
     private var footer: some View {
         HStack(spacing: 18) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(
-                    store.isBusy
+                    store.selectedSession.isBusy
                         ? (store.snapshot.cancelling ? "正在停止，请等待设备清理…" : "刻录期间请保持光驱连接")
                         : store.isDemo ? "演示任务已结束" : store.preflightIssue ?? "已就绪，可以开始刻录"
                 )
                 .font(.subheadline.weight(.medium))
                 Text(
                     store.isDemo
-                        ? "演示任务不访问真实刻录设备。" : store.isBusy ? "Mac 将保持唤醒，任务完成后恢复。" : "支持 CD / DVD / BD，具体取决于光驱与介质。"
+                        ? "演示任务不访问真实刻录设备。"
+                        : store.selectedSession.isBusy ? "Mac 将保持唤醒，任务完成后恢复。" : "支持 CD / DVD / BD，具体取决于光驱与介质。"
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if store.isBusy {
-                Button("停止刻录", role: .destructive) { confirmCancel = true }
-                    .disabled(store.snapshot.cancelling).controlSize(.large)
+            if store.selectedSession.isBusy {
+                Button("停止此设备", role: .destructive) {
+                    cancelSession = store.selectedSession
+                    confirmCancel = true
+                }
+                .disabled(store.snapshot.cancelling).controlSize(.large)
             } else {
                 Button {
                     store.eject()
@@ -131,8 +162,15 @@ struct WorkspaceView: View {
                     Image(systemName: "eject")
                 }
                 .help("弹出光盘").accessibilityLabel("弹出光盘")
-                .disabled(store.selectedDevice?.present != true || store.isDemo)
+                .disabled(store.selectedDevice?.present != true || !store.canEditSelectedSession)
+                if store.sessions.count > 1 {
+                    Button("多机刻录…") {
+                        sharedImage = store.image.map(SharedImageSelection.init)
+                    }
+                    .disabled(store.image == nil || store.isDemo || store.imageCreation.isBusy)
+                }
                 Button {
+                    pendingBurns = [store.selectedSession.burnRequest].compactMap { $0 }
                     confirmBurn = true
                 } label: {
                     Label("开始刻录", systemImage: "flame.fill")
@@ -146,13 +184,13 @@ struct WorkspaceView: View {
 }
 
 struct LogView: View {
-    var store: BurnStore
+    var store: BurnSession
     var body: some View {
         StudioPanel(title: "任务日志", symbol: "list.bullet.rectangle") {
             HStack {
                 Text("记录每一个关键状态").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("导出日志…") { FilePanels.exportLog(store: store) }.buttonStyle(.borderless)
+                Button("导出日志…") { FilePanels.exportLog(session: store) }.buttonStyle(.borderless)
             }
             if store.logs.isEmpty {
                 Text("任务事件将显示在这里。").font(.subheadline).foregroundStyle(.secondary)
@@ -239,3 +277,99 @@ struct DeviceInfoView: View {
 #Preview("Light") { WorkspaceView(store: BurnStore()).preferredColorScheme(.light) }
 #Preview("Dark") { WorkspaceView(store: BurnStore()).preferredColorScheme(.dark) }
 #Preview("Compact") { WorkspaceView(store: BurnStore()).frame(width: 1050, height: 480) }
+
+private struct BurnSessionRow: View {
+    let session: BurnSession
+    let label: String
+    let selected: Bool
+    let select: () -> Void
+
+    private var status: String {
+        if session.snapshot.cancelling { return "正在停止" }
+        if session.isBusy || session.snapshot.phase != .idle { return session.snapshot.phase.title }
+        if session.device == nil { return "设备已断开" }
+        if session.isLoadingImage { return "正在解析镜像…" }
+        return session.errorMessage ?? session.preflightIssue ?? "已就绪"
+    }
+
+    var body: some View {
+        Button(action: select) {
+            HStack(spacing: 12) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? StudioStyle.accent : .secondary)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(label).font(.subheadline.weight(.semibold))
+                    Text(session.image?.url.lastPathComponent ?? "尚未选择镜像")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 12)
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(status).font(.caption).lineLimit(2)
+                    if let progress = session.snapshot.progress {
+                        HStack(spacing: 8) {
+                            ProgressView(value: progress).frame(width: 90)
+                            Text(progress, format: .percent.precision(.fractionLength(0))).monospacedDigit()
+                        }.font(.caption)
+                    }
+                }
+                .foregroundStyle(session.snapshot.phase == .failed ? .red : .secondary)
+            }
+            .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+            .background(selected ? StudioStyle.accent.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .help("设备：\(session.deviceID)\n镜像：\(session.image?.url.path ?? "未选择")")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label)，\(session.image?.url.lastPathComponent ?? "尚未选择镜像")")
+        .accessibilityValue(status + (session.snapshot.progress.map { "，\(Int($0 * 100))%" } ?? ""))
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : [.isButton])
+    }
+}
+
+private struct BurnConfirmationView: View {
+    let requests: [BurnRequest]
+    let start: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("开始写入 \(requests.count) 台设备？").font(.title2.bold())
+            Text("请核对每台设备的镜像与选项。中断写入可能导致光盘无法使用。")
+                .font(.subheadline).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(requests, id: \.sessionID) { request in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label(request.deviceName, systemImage: "opticaldiscdrive").font(.headline)
+                            Text(request.deviceID).font(.caption).foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            Text(request.imageURL.path).font(.subheadline)
+                                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                            Text(
+                                "写入容量：\(BurnFormat.bytes(request.burnBytes)) · 速度：\(request.options.speed == 0 ? "自动" : String(format: "%.1f MB/s", request.options.speed / 1000))"
+                            )
+                            Text(
+                                "封盘：\(request.options.finalize ? "是" : "否") · 校验：\(request.options.verify ? "是" : "否") · 完成后弹出：\(request.options.eject ? "是" : "否")"
+                            )
+                        }
+                        .font(.caption)
+                        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(StudioStyle.surface, in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("开始刻录") {
+                    start()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent).disabled(requests.isEmpty)
+            }
+        }
+        .padding(24).frame(width: 600, height: 480)
+    }
+}

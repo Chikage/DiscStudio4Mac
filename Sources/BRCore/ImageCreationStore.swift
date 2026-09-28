@@ -12,6 +12,7 @@ public final class ImageCreationStore {
     public private(set) var isCancelling = false
     public private(set) var startedAt: Date?
     public private(set) var finishedAt: Date?
+    public private(set) var timeEstimator = ProgressTimeEstimator()
     public private(set) var logs: [BurnLogEntry] = []
     public var errorMessage: String?
     @ObservationIgnored private let service = ImageFileService()
@@ -78,6 +79,7 @@ public final class ImageCreationStore {
         isCancelling = false
         startedAt = .now
         finishedAt = nil
+        timeEstimator = ProgressTimeEstimator()
         logs = []
         receive(ImageUpdate(.preparing, "准备创建：\(destination.lastPathComponent)"))
         activity = ProcessInfo.processInfo.beginActivity(
@@ -112,6 +114,10 @@ public final class ImageCreationStore {
     }
 
     private func receive(_ update: ImageUpdate) {
+        if status.phase != update.phase || status.isProgressEstimated != update.isProgressEstimated {
+            timeEstimator = ProgressTimeEstimator()
+        }
+        timeEstimator.update(progress: update.progress, at: elapsed(at: .now))
         if status.phase != update.phase || (update.progress == nil && status.detail != update.detail) {
             logs.append(BurnLogEntry(update.detail))
             if logs.count > 200 { logs.removeFirst(logs.count - 200) }
@@ -122,5 +128,15 @@ public final class ImageCreationStore {
     public func elapsed(at date: Date) -> TimeInterval {
         guard let startedAt else { return 0 }
         return max(0, (finishedAt ?? date).timeIntervalSince(startedAt))
+    }
+
+    public func remainingTime(at date: Date) -> String {
+        if isCancelling { return "正在停止" }
+        switch status.phase {
+        case .preparing, .copying, .building, .finishing:
+            return timeEstimator.estimate(at: elapsed(at: date)).title
+        case .completed: return "已完成"
+        case .idle, .failed, .cancelled: return "—"
+        }
     }
 }

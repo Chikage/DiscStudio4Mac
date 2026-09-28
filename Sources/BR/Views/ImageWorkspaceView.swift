@@ -45,6 +45,8 @@ struct ImageWorkspaceView: View {
                     .font(.subheadline.weight(.medium))
                     Text(job.isBusy ? "任务期间 Mac 将保持唤醒。" : "保存位置需要足够空间容纳临时数据与最终镜像。")
                         .font(.caption).foregroundStyle(.secondary)
+                    AppVersionView()
+                        .padding(.top, 4)
                 }
                 Spacer()
                 if job.isBusy {
@@ -99,7 +101,10 @@ struct ImageWorkspaceView: View {
             Text(job.status.detail).font(.subheadline).foregroundStyle(.secondary)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                KeyValueRow(label: "已用时间", value: BurnFormat.duration(job.elapsed(at: context.date)))
+                VStack(spacing: 10) {
+                    KeyValueRow(label: "已用时间", value: BurnFormat.duration(job.elapsed(at: context.date)))
+                    KeyValueRow(label: "本阶段预计剩余", value: job.remainingTime(at: context.date))
+                }
             }
             if let output = job.outputURL {
                 HStack {

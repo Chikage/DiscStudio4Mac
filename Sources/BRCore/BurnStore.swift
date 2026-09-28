@@ -7,62 +7,210 @@ public final class BurnStore {
     public var mode: StudioMode = .burn
     public let imageCreation = ImageCreationStore()
     public private(set) var devices: [DiscDevice] = []
-    public var selectedDeviceID: String = ""
-    public private(set) var image: DiscImage?
-    public var options = BurnOptions()
-    public private(set) var snapshot = BurnSnapshot()
-    public private(set) var speedHistory = SpeedHistory()
-    public private(set) var verificationSpeed = VerificationSpeedEstimator()
-    public private(set) var logs: [BurnLogEntry] = []
-    public private(set) var isLoadingImage = false
+    public var selectedDeviceID = ""
+    public private(set) var sessions: [BurnSession]
     public private(set) var isDemo = false
-    public private(set) var startedAt: Date?
-    public private(set) var finishedAt: Date?
-    public private(set) var lastStatusAt: Date?
-    public private(set) var completedOptions = BurnOptions()
-    public var errorMessage: String?
 
-    @ObservationIgnored private let engine = BRDiscEngine()
-    @ObservationIgnored private var imageGeneration = 0
-    @ObservationIgnored private var demoTask: Task<Void, Never>?
-    @ObservationIgnored private var scopedURL: URL?
+    @ObservationIgnored private let deviceMonitor = BRDiscEngine()
+    @ObservationIgnored private let makeEngine: () -> any BurnSessionEngine
     @ObservationIgnored private var didStart = false
+    @ObservationIgnored private var savedSessions: [BurnSession] = []
+    @ObservationIgnored private var savedDeviceID = ""
+    private var sharedPreparation: SharedBurnPreparation?
 
-    public init() {}
+    public convenience init() { self.init(makeEngine: { NativeBurnSessionEngine() }) }
 
+    init(makeEngine: @escaping () -> any BurnSessionEngine) {
+        self.makeEngine = makeEngine
+        sessions = [BurnSession(engine: makeEngine())]
+    }
+
+    public var selectedSession: BurnSession {
+        sessions.first { $0.deviceID == selectedDeviceID } ?? sessions[0]
+    }
     public var selectedDevice: DiscDevice? { devices.first { $0.id == selectedDeviceID } }
-    public var isBusy: Bool { snapshot.phase.isActive || imageCreation.isBusy }
-    public var preflightIssue: String? { BurnPreflight.issue(image: image, device: selectedDevice, options: options) }
-    public var canBurn: Bool { !isDemo && !isBusy && !isLoadingImage && preflightIssue == nil }
+    public func label(for session: BurnSession) -> String {
+        guard !session.deviceID.isEmpty, let index = sessions.firstIndex(where: { $0.id == session.id }) else {
+            return session.deviceName
+        }
+        return "设备 \(index + 1) · \(session.deviceName)"
+    }
+    public var image: DiscImage? { selectedSession.image }
+    public var snapshot: BurnSnapshot { selectedSession.snapshot }
+    public var options: BurnOptions {
+        get { selectedSession.options }
+        set { if canEditSelectedSession { selectedSession.options = newValue } }
+    }
+    public var errorMessage: String? {
+        get { selectedSession.errorMessage }
+        set { selectedSession.errorMessage = newValue }
+    }
+    /// App-wide activity is used for quitting, mode changes and image creation only.
+    public var isBusy: Bool { sessions.contains { $0.isBusy } || imageCreation.isBusy || sharedPreparation != nil }
+    public var isLoadingImage: Bool { sessions.contains { $0.isLoadingImage } }
+    public var activeBurnCount: Int { sessions.filter { $0.isBusy }.count }
+    public var canEditSelectedSession: Bool {
+        !isDemo && !imageCreation.isBusy && !selectedSession.isBusy && !isReserved(selectedSession)
+    }
+    public var preflightIssue: String? { selectedSession.preflightIssue }
+    public var canBurn: Bool { canEditSelectedSession && selectedSession.canBurn }
+    public var readySessions: [BurnSession] {
+        guard !isDemo, !imageCreation.isBusy else { return [] }
+        return sessions.filter { $0.canBurn && !isReserved($0) }
+    }
+    public var canApplyImageToOtherDevices: Bool { image != nil && !imageCopyTargets.isEmpty }
+    private var imageCopyTargets: [BurnSession] {
+        guard !isDemo, !imageCreation.isBusy else { return [] }
+        return sessions.filter {
+            $0.id != selectedSession.id && $0.device != nil && !$0.isBusy && !$0.isLoadingImage && !isReserved($0)
+        }
+    }
 
     public func connect() {
         guard !didStart else { return }
         didStart = true
-        // The Objective-C adapter guarantees main-run-loop callbacks; no legacy object crosses actors.
-        engine.onDevices = { [weak self] values in
+        deviceMonitor.onDevices = { [weak self] values in
             let devices = values.map(DiscDevice.init(dictionary:))
-            MainActor.assumeIsolated {
-                guard let self, !self.isDemo else { return }
-                self.devices = devices
-                if !self.isBusy && !self.devices.contains(where: { $0.id == self.selectedDeviceID }) {
-                    self.selectedDeviceID = self.devices.first?.id ?? ""
-                }
-                if !self.isBusy, self.options.speed != 0,
-                    !(self.selectedDevice?.speeds.contains(self.options.speed) ?? false)
-                {
-                    self.options.speed = 0
-                }
-            }
+            MainActor.assumeIsolated { self?.updateDevices(devices) }
         }
-        engine.onStatus = { [weak self] dictionary in
-            let snapshot = BurnSnapshot(dictionary: dictionary)
-            MainActor.assumeIsolated { self?.receive(snapshot) }
-        }
-        engine.observeDevices()
-        appendLog("Disc Studio 已就绪，等待选择镜像与刻录设备。")
+        deviceMonitor.observeDevices()
     }
 
-    public func refreshDevices() { if !isDemo { engine.refreshDevices() } }
+    func updateDevices(_ devices: [DiscDevice]) {
+        guard !isDemo else { return }
+        self.devices = devices
+        for device in devices where !sessions.contains(where: { $0.deviceID == device.id }) {
+            if let draft = sessions.first(where: { $0.deviceID.isEmpty }) {
+                draft.updateDevice(device)
+            } else {
+                let session = BurnSession(engine: makeEngine())
+                session.updateDevice(device)
+                sessions.append(session)
+            }
+        }
+        // Keep disconnected sessions (including active ones) and their logs until the engine finishes cleanup.
+        for session in sessions {
+            session.updateDevice(devices.first { $0.id == session.deviceID })
+        }
+        if selectedDeviceID.isEmpty { selectedDeviceID = devices.first?.id ?? "" }
+    }
+
+    public func refreshDevices() { if !isDemo { deviceMonitor.refreshDevices() } }
+
+    public func selectImage(_ url: URL, sessionID: UUID? = nil) {
+        guard !isDemo, !imageCreation.isBusy else { return }
+        let target = sessionID.map { id in sessions.first { $0.id == id } } ?? selectedSession
+        guard let session = target, !session.isBusy, !isReserved(session) else { return }
+        session.selectImage(url)
+    }
+
+    public func applyImageToOtherDevices() {
+        guard let url = image?.url else { return }
+        // Reparse on each engine so DRTrack producers and verification state stay independent.
+        for session in imageCopyTargets { session.selectImage(url) }
+    }
+
+    public func startBurn() { startBurns([selectedSession.burnRequest].compactMap { $0 }) }
+
+    public func startBurns(_ requests: [BurnRequest]) {
+        guard !isDemo, !imageCreation.isBusy else { return }
+        var started = Set<UUID>()
+        for request in requests where started.insert(request.sessionID).inserted {
+            guard let session = sessions.first(where: { $0.id == request.sessionID }) else { continue }
+            guard !session.isBusy, !isReserved(session) else { continue }
+            guard session.burnRequest == request else {
+                session.errorMessage = session.preflightIssue ?? "镜像或刻录选项已改变，请重新确认。"
+                continue
+            }
+            // A synchronous failure on one drive must not prevent the other confirmed jobs starting.
+            session.startBurn()
+        }
+    }
+
+    public func sharedImageIssue(_ image: DiscImage, for session: BurnSession) -> String? {
+        if session.isBusy { return "此设备正在刻录，请等待任务结束。" }
+        if session.isLoadingImage || isReserved(session) { return "此设备正在准备镜像。" }
+        return BurnPreflight.issue(image: image, device: session.device, options: session.options)
+    }
+
+    /// Called only after the user confirms the image, explicit destinations and their options.
+    /// All destinations finish preparation before any of them start writing.
+    public func startSharedImageBurn(
+        image: DiscImage, targetIDs: Set<UUID>, completion: @escaping @MainActor (String?) -> Void
+    ) {
+        guard !isDemo, !imageCreation.isBusy, sharedPreparation == nil else {
+            completion("当前无法准备多机刻录，请等待其他准备任务结束。")
+            return
+        }
+        let targets = sessions.filter { targetIDs.contains($0.id) }
+        guard !targets.isEmpty, targets.count == targetIDs.count else {
+            completion("请选择需要刻录的设备。")
+            return
+        }
+        for session in targets {
+            if let issue = sharedImageIssue(image, for: session) {
+                completion("\(label(for: session))：\(issue)")
+                return
+            }
+        }
+        let preparation = SharedBurnPreparation(image: image, targets: targets, completion: completion)
+        sharedPreparation = preparation
+        for session in targets {
+            session.selectImage(image.url) { [weak self] success in
+                self?.finishSharedPreparation(preparation.id, session: session, success: success)
+            }
+        }
+    }
+
+    public func cancelSharedImageBurn() {
+        guard let preparation = sharedPreparation else { return }
+        sharedPreparation = nil
+        preparation.completion("已取消准备，没有开始写入。")
+    }
+
+    private func isReserved(_ session: BurnSession) -> Bool {
+        sharedPreparation?.options[session.id] != nil
+    }
+
+    private func finishSharedPreparation(_ id: UUID, session: BurnSession, success: Bool) {
+        guard let preparation = sharedPreparation, preparation.id == id,
+            preparation.remaining.remove(session.id) != nil
+        else { return }
+        if !success {
+            preparation.failure = "\(label(for: session))：\(session.errorMessage ?? "镜像准备已取消。")"
+        }
+        guard preparation.remaining.isEmpty else { return }
+        var requests: [BurnRequest] = []
+        for target in preparation.targets {
+            guard let request = target.burnRequest,
+                request.options == preparation.options[target.id],
+                let image = target.image,
+                image.url == preparation.image.url,
+                image.blocks == preparation.image.blocks,
+                image.fileBytes == preparation.image.fileBytes,
+                image.tracks == preparation.image.tracks
+            else {
+                preparation.failure =
+                    preparation.failure
+                    ?? "\(label(for: target))：\(target.preflightIssue ?? "镜像或选项已改变，请重新确认。")"
+                continue
+            }
+            requests.append(request)
+        }
+        sharedPreparation = nil
+        if let failure = preparation.failure {
+            preparation.completion(failure + " 所选设备均未开始写入。")
+            return
+        }
+        startBurns(requests)
+        preparation.completion(nil)
+    }
+
+    public func cancel() { selectedSession.cancel() }
+    public func eject() {
+        guard canEditSelectedSession else { return }
+        selectedSession.eject()
+    }
 
     public func createImage(to destination: URL) {
         guard !isBusy, !isDemo, !isLoadingImage else { return }
@@ -70,9 +218,8 @@ public final class BurnStore {
         case .burn: return
         case .buildISO: imageCreation.build(to: destination)
         case .copyDisc:
-            // Refresh synchronously immediately before resolving the source device.
             let sourceID = selectedDeviceID
-            engine.refreshDevices()
+            deviceMonitor.refreshDevices()
             guard selectedDeviceID == sourceID else {
                 imageCreation.errorMessage = "来源光驱已断开，请重新选择。"
                 return
@@ -85,200 +232,54 @@ public final class BurnStore {
         }
     }
 
-    public func selectImage(_ url: URL) {
-        guard !isBusy, !isDemo else { return }
-        imageGeneration += 1
-        let generation = imageGeneration
-        let accessing = url.startAccessingSecurityScopedResource()
-        isLoadingImage = true
-        image = nil
-        snapshot = BurnSnapshot()
-        speedHistory = SpeedHistory()
-        verificationSpeed = VerificationSpeedEstimator()
-        startedAt = nil
-        finishedAt = nil
-        lastStatusAt = nil
-        errorMessage = nil
-        engine.prepareImage(at: url) { [weak self] dictionary, error in
-            let preparedImage = dictionary.map { DiscImage(url: url, dictionary: $0) }
-            MainActor.assumeIsolated {
-                guard let self, generation == self.imageGeneration else {
-                    if accessing { url.stopAccessingSecurityScopedResource() }
-                    return
-                }
-                self.isLoadingImage = false
-                self.scopedURL?.stopAccessingSecurityScopedResource()
-                self.scopedURL = nil
-                if let error {
-                    if accessing { url.stopAccessingSecurityScopedResource() }
-                    self.errorMessage = error.localizedDescription
-                    self.appendLog("镜像解析失败：\(error.localizedDescription)")
-                } else if let preparedImage {
-                    if accessing { self.scopedURL = url }
-                    self.image = preparedImage
-                    self.appendLog("镜像已载入：\(url.lastPathComponent)，\(self.image?.tracks ?? 0) 条轨道。")
-                }
-            }
-        }
-    }
-
-    public func startBurn() {
-        guard canBurn else {
-            errorMessage = preflightIssue ?? "当前无法开始刻录。"
-            return
-        }
-        resetSession()
-        snapshot.phase = .preparing
-        appendLog("开始刻录：\(image?.url.lastPathComponent ?? "") → \(selectedDevice?.name ?? "")")
-        appendLog("封盘：\(options.finalize ? "开启" : "保留追加能力")；回读校验：\(options.verify ? "开启" : "关闭")；欠载保护：已请求。")
-        do {
-            try engine.start(
-                onDevice: selectedDeviceID, speed: options.speed,
-                finalize: options.finalize, verify: options.verify, eject: options.eject)
-        } catch {
-            var failure = BurnSnapshot()
-            failure.phase = .failed
-            failure.error = error.localizedDescription
-            receive(failure)
-        }
-    }
-
-    public func cancel() {
-        guard snapshot.phase.isActive, !snapshot.cancelling else { return }
-        snapshot.cancelling = true
-        appendLog("已请求停止，等待刻录引擎完成清理。")
-        if isDemo {
-            demoTask?.cancel()
-            var cancelled = BurnSnapshot()
-            cancelled.phase = .cancelled
-            receive(cancelled)
-        } else {
-            engine.cancel()
-        }
-    }
-
-    public func eject() {
-        guard !isBusy, !isDemo else { return }
-        do { try engine.ejectDevice(selectedDeviceID) } catch { errorMessage = error.localizedDescription }
-    }
-
-    public func elapsed(at date: Date = Date()) -> TimeInterval {
-        guard let startedAt else { return 0 }
-        return max(0, (finishedAt ?? date).timeIntervalSince(startedAt))
-    }
-
-    public var logText: String {
-        let formatter = ISO8601DateFormatter()
-        return
-            (["Disc Studio 刻录日志\(isDemo ? " [演示数据]" : "")"]
-            + logs.map {
-                "[\(formatter.string(from: $0.date))] \($0.message)"
-            }).joined(separator: "\n")
-    }
-
-    private func appendLog(_ message: String) {
-        logs.append(BurnLogEntry(message))
-        if logs.count > 500 { logs.removeFirst(logs.count - 500) }
-    }
-
-    private func resetSession() {
-        snapshot = BurnSnapshot()
-        speedHistory = SpeedHistory()
-        verificationSpeed = VerificationSpeedEstimator()
-        startedAt = Date()
-        finishedAt = nil
-        lastStatusAt = nil
-        completedOptions = options
-        errorMessage = nil
-    }
-
-    private func receive(_ update: BurnSnapshot) {
-        let previous = snapshot.phase
-        snapshot = update
-        let now = Date()
-        lastStatusAt = now
-        if previous != update.phase { appendLog(update.phase.title) }
-        let seconds = elapsed(at: now)
-        speedHistory.beginPhase(update.phase)
-        verificationSpeed.update(update, totalBytes: image?.burnBytes ?? 0, at: seconds)
-        let speed = update.phase == .verifying ? verificationSpeed.kilobytesPerSecond : update.speedKB
-        if let speed {
-            speedHistory.append(SpeedSample(seconds: seconds, megabytesPerSecond: speed / 1000))
-        }
-        if !update.phase.isActive && update.phase != .idle {
-            finishedAt = Date()
-            if let error = update.error, update.phase == .failed {
-                errorMessage = error
-                appendLog(error)
-            }
-            if update.phase == .completed {
-                appendLog(completedOptions.verify ? "写入与回读校验均已完成。" : "写入完成；本次未执行回读校验。")
-                appendLog(completedOptions.finalize ? "已请求并完成封盘。" : "本次保留追加能力，实际取决于介质支持。")
-            }
-        }
-    }
-
-    /// This path never invokes DRBurn, even with physical drives connected.
+    /// Three independent simulated jobs, including shared and different images; never invokes DRBurn.
     public func startDemo() {
-        guard !isBusy, !isLoadingImage else { return }
+        guard !isBusy, !isLoadingImage, !isDemo else { return }
         mode = .burn
+        savedSessions = sessions
+        savedDeviceID = selectedDeviceID
         isDemo = true
-        image = DiscImage(
-            url: URL(fileURLWithPath: "/演示/Archive-2026.iso"),
-            dictionary: [
-                "fileBytes": 3_221_225_472, "burnBytes": 3_221_225_472, "blocks": 1_572_864, "tracks": 1,
-            ])
-        devices = [
-            DiscDevice(dictionary: [
-                "id": "demo", "name": "演示刻录机", "media": "DVD-R",
+        sessions = (1...3).map { index in
+            let device = DiscDevice(dictionary: [
+                "id": "demo-\(index)", "name": "演示刻录机 \(index)", "media": "DVD-R",
                 "present": true, "blank": true, "busy": false, "freeBlocks": 2_298_496,
-                "canWrite": true,
-                "speeds": [5540.0, 11080.0], "baseSpeed": 1385.0,
+                "canWrite": true, "speeds": [5540.0, 11080.0], "baseSpeed": 1385.0,
                 "bufferCapacity": 2_097_152, "underrunProtection": true,
             ])
-        ]
-        selectedDeviceID = "demo"
-        options = BurnOptions()
-        resetSession()
-        appendLog("进入演示模式。所有数据均为模拟，不会写入任何设备。")
-        snapshot.phase = .preparing
-        demoTask = Task { [weak self] in
-            for step in 0...90 {
-                do { try await Task.sleep(for: .milliseconds(450)) } catch { return }
-                guard let self, !Task.isCancelled else { return }
-                let phase: BurnPhase =
-                    step < 5
-                    ? .preparing : step < 65 ? .writing : step < 73 ? .finishing : step < 90 ? .verifying : .completed
-                var update = BurnSnapshot()
-                update.phase = phase
-                update.progress =
-                    phase == .writing
-                    ? Double(step - 5) / 60
-                    : phase == .verifying ? Double(step - 73) / 17 : phase == .completed ? 1 : nil
-                if phase == .writing {
-                    update.speedKB = 10100 + sin(Double(step) * 0.6) * 720
-                    update.speedX = (update.speedKB ?? 0) / 1385
-                }
-                update.track = 1
-                self.receive(update)
-            }
+            let session = BurnSession(engine: makeEngine())
+            session.startDemo(
+                device: device, imageName: index == 3 ? "Photos-2026.iso" : "Archive-2026.iso", offset: (index - 1) * 8)
+            return session
         }
+        devices = sessions.compactMap(\.device)
+        selectedDeviceID = devices[0].id
     }
 
     public func exitDemo() {
         guard isDemo, !isBusy else { return }
-        demoTask = nil
+        sessions = savedSessions
+        savedSessions = []
+        selectedDeviceID = savedDeviceID
         isDemo = false
-        image = nil
-        snapshot = BurnSnapshot()
-        speedHistory = SpeedHistory()
-        verificationSpeed = VerificationSpeedEstimator()
-        logs = []
-        startedAt = nil
-        finishedAt = nil
-        lastStatusAt = nil
-        selectedDeviceID = ""
-        engine.refreshDevices()
-        appendLog("已返回真实设备模式。")
+        deviceMonitor.refreshDevices()
+    }
+}
+
+@MainActor
+private final class SharedBurnPreparation {
+    let id = UUID()
+    let image: DiscImage
+    let targets: [BurnSession]
+    let options: [UUID: BurnOptions]
+    let completion: @MainActor (String?) -> Void
+    var remaining: Set<UUID>
+    var failure: String?
+
+    init(image: DiscImage, targets: [BurnSession], completion: @escaping @MainActor (String?) -> Void) {
+        self.image = image
+        self.targets = targets
+        self.options = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, $0.options) })
+        self.remaining = Set(targets.map(\.id))
+        self.completion = completion
     }
 }

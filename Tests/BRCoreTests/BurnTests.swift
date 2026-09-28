@@ -110,52 +110,73 @@ struct BurnTests {
         #expect(drive.bufferCapacity == 4_161_536)
     }
 
-    @Test func speedHistoryRetainsAFullMinuteAtHighUpdateRates() {
+    @Test func speedHistoryRetainsTheWholePhaseAtHighUpdateRates() {
         var history = SpeedHistory()
-        // Ten readings per second over a long burn must not collapse into the last 180 readings.
-        for tick in 0...9000 {
-            history.append(SpeedSample(seconds: Double(tick) / 10, megabytesPerSecond: 17))
+        for tick in 0...100_000 {
+            history.record(progress: Double(tick) / 100_000, megabytesPerSecond: 17)
         }
-        let visible = history.samples(at: 900)
-        #expect(visible.count == 601)
-        #expect(visible.first?.seconds == 840)
-        #expect(visible.last?.seconds == 900)
-        #expect(history.samples.count == visible.count)
+        #expect(history.samples.count <= 1002)
+        #expect(history.samples.first?.progress == 0)
+        #expect(history.samples.last?.progress == 1)
+        #expect(history.progress == 1)
     }
 
-    @Test func speedHistoryUsesTimeBoundariesAndAgesWithoutNewReadings() {
+    @Test func speedHistoryUsesReportedProgressAndUpdatesRepeatedReadings() {
         var history = SpeedHistory()
-        for seconds in [0.0, 29.0, 30.0, 60.0, 90.0] {
-            history.append(SpeedSample(seconds: seconds, megabytesPerSecond: 10))
-        }
-        #expect(history.samples(at: 90).map(\.seconds) == [30, 60, 90])
-        #expect(history.samples(at: 120).map(\.seconds) == [60, 90])
-        #expect(history.samples(at: 151).isEmpty)
+        history.record(progress: 0.13, megabytesPerSecond: 11.81)
+        history.record(progress: 0.13, megabytesPerSecond: 7)
+        #expect(history.samples.count == 1)
+        history.record(progress: 0.1305, megabytesPerSecond: 12)
+        #expect(history.samples.count == 2)
+        #expect(history.samples.last?.progress == 0.1305)
+        #expect(history.samples.last?.megabytesPerSecond == 12)
+        history.record(progress: 0.5, megabytesPerSecond: 0)
+        #expect(history.samples.map(\.progress) == [0.13, 0.1305, 0.5])
+        #expect(history.samples.last?.megabytesPerSecond == 0)
     }
 
-    @Test func speedHistoryStartsEmptyAndPreservesEarlySamples() {
+    @Test func speedHistoryDoesNotInventMissingProgressOrSpeed() {
         var history = SpeedHistory()
-        #expect(history.samples(at: 0).isEmpty)
-        history.append(SpeedSample(seconds: 2, megabytesPerSecond: 0))
-        history.append(SpeedSample(seconds: 5, megabytesPerSecond: 12))
-        #expect(history.samples(at: 5).map(\.megabytesPerSecond) == [0, 12])
-        #expect(history.samples(at: 3).map(\.seconds) == [2])
-        history = SpeedHistory()
-        #expect(history.samples(at: 0).isEmpty)
+        for progress in [nil, Double.nan, -0.1, 1.1] {
+            history.record(progress: progress, megabytesPerSecond: 12)
+        }
+        #expect(history.samples.isEmpty)
+        #expect(history.progress == nil)
+        for speed in [nil, Double.nan, Double.infinity, -1] {
+            history.record(progress: 0.2, megabytesPerSecond: speed)
+        }
+        #expect(history.samples.isEmpty)
+        #expect(history.progress == 0.2)
+        history.record(progress: 0.3, megabytesPerSecond: 12)
+        history.record(progress: 0.4, megabytesPerSecond: nil)
+        #expect(history.samples.last?.progress == 0.3)
+        #expect(history.progress == 0.4)
+    }
+
+    @Test func speedHistoryResetsWhenDeviceProgressRestartsEvenWithoutSpeed() {
+        var history = SpeedHistory()
+        history.record(progress: 0.8, megabytesPerSecond: 12)
+        history.record(progress: 0.1, megabytesPerSecond: nil)
+        #expect(history.samples.isEmpty)
+        #expect(history.progress == 0.1)
+        history.record(progress: 0.2, megabytesPerSecond: 10)
+        #expect(history.samples.map(\.progress) == [0.2])
     }
 
     @Test func verificationStartsANewSpeedCurveAndRetainsItsMeaningAfterCompletion() {
         var history = SpeedHistory()
-        history.append(SpeedSample(seconds: 40, megabytesPerSecond: 17))
+        history.record(progress: 0.9, megabytesPerSecond: 17)
         history.beginPhase(.finishing)
         #expect(history.samples.count == 1)
         history.beginPhase(.verifying)
         #expect(history.samples.isEmpty)
+        #expect(history.progress == nil)
         #expect(history.phase == .verifying)
-        history.append(SpeedSample(seconds: 45, megabytesPerSecond: 12))
+        history.record(progress: 0.1, megabytesPerSecond: 12)
         history.beginPhase(.verifying)
         history.beginPhase(.completed)
-        #expect(history.samples(at: 45).map(\.megabytesPerSecond) == [12])
+        #expect(history.samples.map(\.megabytesPerSecond) == [12])
+        #expect(history.progress == 0.1)
         #expect(history.phase == .verifying)
         history.beginPhase(.writing)
         #expect(history.samples.isEmpty)
@@ -179,6 +200,58 @@ struct BurnTests {
         snapshot.phase = .completed
         estimator.update(snapshot, totalBytes: 100_000_000, at: 13)
         #expect(estimator.kilobytesPerSecond == nil)
+    }
+
+    @Test func verificationCurveIncludesItsMeasuredStartAndSuccessfulEnd() throws {
+        var estimator = VerificationSpeedEstimator()
+        var history = SpeedHistory()
+        history.beginPhase(.verifying)
+        var snapshot = BurnSnapshot(dictionary: ["phase": "verifying", "progress": 0, "track": 1])
+        #expect(estimator.update(snapshot, totalBytes: 100_000_000, at: 10) == nil)
+        snapshot.progress = 0.2
+        let firstReading = estimator.update(snapshot, totalBytes: 100_000_000, at: 11)
+        let first = try #require(firstReading)
+        history.record(first)
+        #expect(first.progressRange == 0...0.2)
+        #expect(history.samples.map(\.progress) == [0, 0.2])
+        snapshot.progress = 0.94
+        let intermediateReading = estimator.update(snapshot, totalBytes: 100_000_000, at: 15)
+        history.record(try #require(intermediateReading))
+        let finalReading = estimator.finish(totalBytes: 100_000_000, at: 15.3)
+        let last = try #require(finalReading)
+        history.record(last)
+        #expect(last.progressRange == 0.94...1)
+        #expect(abs(last.kilobytesPerSecond - 20_000) < 0.001)
+        #expect(history.samples.first?.progress == 0)
+        #expect(history.samples.last?.progress == 1)
+        #expect(estimator.finish(totalBytes: 100_000_000, at: 16) == nil)
+    }
+
+    @Test func verificationDoesNotInventAnUnobservedStartOrFinishAfterFailure() throws {
+        var estimator = VerificationSpeedEstimator()
+        var history = SpeedHistory()
+        var snapshot = BurnSnapshot(dictionary: ["phase": "verifying", "progress": 0.3])
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 10)
+        snapshot.progress = 0.5
+        let reading = estimator.update(snapshot, totalBytes: 100_000_000, at: 11)
+        history.record(try #require(reading))
+        #expect(history.samples.first?.progress == 0.3)
+        #expect(estimator.finish(totalBytes: 200_000_000, at: 12) == nil)
+        #expect(estimator.finish(totalBytes: 100_000_000, at: 11) == nil)
+        snapshot.phase = .failed
+        estimator.update(snapshot, totalBytes: 100_000_000, at: 12)
+        #expect(estimator.finish(totalBytes: 100_000_000, at: 13) == nil)
+        #expect(history.samples.last?.progress == 0.5)
+    }
+
+    @Test func verificationCanFinishBeforeItsFirstRegularSpeedReading() throws {
+        var estimator = VerificationSpeedEstimator()
+        var history = SpeedHistory()
+        estimator.update(BurnSnapshot(dictionary: ["phase": "verifying", "progress": 0]), totalBytes: 1_000_000, at: 10)
+        let reading = estimator.finish(totalBytes: 1_000_000, at: 10.5)
+        history.record(try #require(reading))
+        #expect(history.samples.map(\.progress) == [0, 1])
+        #expect(history.samples.last?.megabytesPerSecond == 2)
     }
 
     @Test func verificationSpeedResetsAcrossTracksMissingProgressAndCancellation() {
@@ -231,6 +304,8 @@ struct BurnTests {
         #expect(store.isDemo)
         store.cancel()
         #expect(store.snapshot.phase == .cancelled)
+        #expect(store.activeBurnCount == 2)
+        for session in store.sessions { session.cancel() }
         #expect(!store.isBusy)
         store.exitDemo()
         #expect(!store.isDemo)
