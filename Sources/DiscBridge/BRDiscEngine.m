@@ -1,5 +1,6 @@
 #import "BRDiscEngine.h"
 #import <DiscRecording/DiscRecording.h>
+#import <DiskArbitration/DiskArbitration.h>
 
 static NSError *BRError(NSString *message) {
     return [NSError errorWithDomain:@"app.br.discburner" code:1
@@ -44,7 +45,7 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
     [self refreshDevices];
 }
 
-- (NSDictionary *)snapshot:(DRDevice *)device {
+- (NSDictionary *)snapshot:(DRDevice *)device diskSession:(DASessionRef)diskSession {
     NSDictionary *info = device.info;
     NSDictionary *status = device.status;
     NSDictionary *media = status[DRDeviceMediaInfoKey] ?: @{};
@@ -66,6 +67,16 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
         @"mediaSessionCount": media[DRDeviceMediaSessionCountKey] ?: @0,
         @"speeds": status[DRDeviceBurnSpeedsKey] ?: @[], @"baseSpeed": @(base)
     } mutableCopy];
+    NSString *bsdName = media[DRDeviceMediaBSDNameKey];
+    if (diskSession && bsdName.length) {
+        DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, diskSession, bsdName.UTF8String);
+        if (disk) {
+            NSDictionary *description = CFBridgingRelease(DADiskCopyDescription(disk));
+            NSString *volumeName = description[(__bridge NSString *)kDADiskDescriptionVolumeNameKey];
+            if (volumeName.length) result[@"volumeName"] = volumeName;
+            CFRelease(disk);
+        }
+    }
     NSDictionary *hardwareKeys = @{
         @"vendor": DRDeviceVendorNameKey,
         @"product": DRDeviceProductNameKey,
@@ -102,11 +113,13 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
 
 - (void)refreshDevices {
     NSMutableArray *devices = [NSMutableArray array];
+    DASessionRef diskSession = DASessionCreate(kCFAllocatorDefault);
     for (DRDevice *device in DRDevice.devices) {
         if (device.isValid) {
-            [devices addObject:[self snapshot:device]];
+            [devices addObject:[self snapshot:device diskSession:diskSession]];
         }
     }
+    if (diskSession) CFRelease(diskSession);
     if (self.onDevices) self.onDevices(devices);
 }
 
@@ -207,7 +220,7 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
     // Existing contents are never erased or appended to implicitly.
     else if (!device.mediaIsBlank) failure = @"请使用空白光盘；Disc Studio 不会自动擦除已有数据。";
     else {
-        NSDictionary *snapshot = [self snapshot:device];
+        NSDictionary *snapshot = [self snapshot:device diskSession:NULL];
         [self logDiagnostic:[NSString stringWithFormat:
             @"[设备与介质] 型号=%@；固件=%@；连接=%@；位置=%@；介质=%@；1×=%@ KB/s",
             snapshot[@"name"], snapshot[@"firmware"] ?: @"未提供", snapshot[@"interconnect"] ?: @"未提供",

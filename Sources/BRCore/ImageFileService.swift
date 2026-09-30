@@ -1,6 +1,17 @@
 import Foundation
 
-actor ImageFileService {
+protocol ImageFileServicing: Sendable {
+    func build(
+        sources: [URL], volumeName: String, fileSystem: DataDiscFileSystem, destination: URL,
+        update: @Sendable (ImageUpdate) async -> Void
+    ) async throws
+    func copyDisc(
+        device: DiscDevice, format: DiscCopyFormat, destination: URL,
+        update: @Sendable (ImageUpdate) async -> Void
+    ) async throws
+}
+
+actor ImageFileService: ImageFileServicing {
     private let commands = ImageCommandRunner()
     private let files = FileManager.default
 
@@ -141,19 +152,23 @@ actor ImageFileService {
         guard let name = device.mediaBSDName,
             name.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil
         else { throw ImageCreationError("系统未提供有效的完整光盘设备地址。") }
-        let source = URL(fileURLWithPath: "/dev/\(name)")
+        let deviceNode = URL(fileURLWithPath: "/dev/\(name)")
+        // Mounted optical media can reject the buffered block device with EBUSY.
+        // The corresponding raw character device supports read-only, sector-aligned I/O.
+        let source = URL(fileURLWithPath: "/dev/r\(name)")
         // DiscRecording supplies the node, never an arbitrary disk selected by the user.
         // Verify readable ISO/UDF sectors before creating any image, excluding audio CDs.
-        guard try Self.hasDataDiscSignature(source) else {
+        await update(ImageUpdate(.preparing, "检查来源光盘：\(source.path)…"))
+        guard try Self.readDiscSource(source, operation: { try Self.hasDataDiscSignature(source) }) else {
             throw ImageCreationError("仅支持 ISO 9660 / UDF 数据光盘；音频 CD、混合轨道和其他文件系统暂不支持。")
         }
         let work = try workspace(for: destination)
         defer { try? files.removeItem(at: work) }
         let rawImage = work.appendingPathComponent("disc.cdr")
         await update(ImageUpdate(.copying, "从 \(device.name) 读取光盘扇区…"))
-        let infoData = try await commands.run("/usr/sbin/diskutil", arguments: ["info", "-plist", source.path])
+        let infoData = try await commands.run("/usr/sbin/diskutil", arguments: ["info", "-plist", deviceNode.path])
         let info = try PropertyListSerialization.propertyList(from: infoData, format: nil) as? [String: Any]
-        guard let bytes = (info?["TotalSize"] as? NSNumber)?.uint64Value, bytes > 0,
+        guard let bytes = (info?["TotalSize"] as? NSNumber)?.uint64Value, bytes > 0, bytes % 2048 == 0,
             info?["DeviceIdentifier"] as? String == name
         else { throw ImageCreationError("无法确定来源光盘的完整扇区大小。") }
         try await copySectors(from: source, to: rawImage, bytes: bytes, update: update)
@@ -182,7 +197,7 @@ actor ImageFileService {
         from source: URL, to output: URL, bytes: UInt64,
         update: @Sendable (ImageUpdate) async -> Void
     ) async throws {
-        let input = try FileHandle(forReadingFrom: source)
+        let input = try Self.readDiscSource(source) { try FileHandle(forReadingFrom: source) }
         defer { try? input.close() }
         guard files.createFile(atPath: output.path, contents: nil) else {
             throw ImageCreationError("无法创建光盘镜像临时文件。")
@@ -191,11 +206,16 @@ actor ImageFileService {
         defer { try? writer.close() }
         var copied: UInt64 = 0
         var lastUpdate = Date.distantPast
+        await update(ImageUpdate(.copying, "开始读取光盘扇区…", progress: 0, readBytes: 0, totalReadBytes: bytes))
         while copied < bytes {
             try Task.checkCancellation()
             let count = Int(min(1_048_576, bytes - copied))
-            guard let data = try input.read(upToCount: count), !data.isEmpty else {
+            let data = try Self.readDiscSource(source) { try input.read(upToCount: count) }
+            guard let data, !data.isEmpty else {
                 throw ImageCreationError("光盘读取提前结束，未保存不完整的镜像。")
+            }
+            guard data.count % 2048 == 0 else {
+                throw ImageCreationError("光盘返回了不完整的扇区，未保存不完整的镜像。")
             }
             try writer.write(contentsOf: data)
             copied += UInt64(data.count)
@@ -204,12 +224,20 @@ actor ImageFileService {
                     ImageUpdate(
                         .copying,
                         "已读取 \(BurnFormat.bytes(Int64(clamping: copied))) / \(BurnFormat.bytes(Int64(clamping: bytes)))",
-                        progress: Double(copied) / Double(bytes)))
+                        progress: Double(copied) / Double(bytes), readBytes: copied, totalReadBytes: bytes))
                 lastUpdate = .now
             }
         }
         try Task.checkCancellation()
         try writer.synchronize()
+    }
+
+    private static func readDiscSource<T>(_ source: URL, operation: () throws -> T) throws -> T {
+        do {
+            return try operation()
+        } catch {
+            throw DiscSourceReadError(source: source, underlyingError: error as NSError)
+        }
     }
 
     private func workspace(for destination: URL) throws -> URL {

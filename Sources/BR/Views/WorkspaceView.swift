@@ -18,7 +18,7 @@ struct WorkspaceView: View {
                     ForEach(StudioMode.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented).labelsHidden().frame(width: 420)
-                .disabled(store.isBusy || store.isLoadingImage || store.isDemo)
+                .disabled(store.isDemo)
                 Spacer()
             }.padding(.horizontal, 24).padding(.vertical, 12).background(.bar)
             Divider()
@@ -167,7 +167,7 @@ struct WorkspaceView: View {
                     Button("多机刻录…") {
                         sharedImage = store.image.map(SharedImageSelection.init)
                     }
-                    .disabled(store.image == nil || store.isDemo || store.imageCreation.isBusy)
+                    .disabled(store.image == nil || store.isDemo)
                 }
                 Button {
                     pendingBurns = [store.selectedSession.burnRequest].compactMap { $0 }
@@ -286,7 +286,9 @@ private struct BurnSessionRow: View {
 
     private var status: String {
         if session.snapshot.cancelling { return "正在停止" }
-        if session.isBusy || session.snapshot.phase != .idle { return session.snapshot.phase.title }
+        if session.isBusy { return session.snapshot.phase.title }
+        if session.discCopy.isBusy { return "正在提取镜像" }
+        if session.snapshot.phase != .idle { return session.snapshot.phase.title }
         if session.device == nil { return "设备已断开" }
         if session.isLoadingImage { return "正在解析镜像…" }
         return session.errorMessage ?? session.preflightIssue ?? "已就绪"

@@ -6,9 +6,7 @@ struct ImageWorkspaceView: View {
     @Bindable var store: BurnStore
     private var job: ImageCreationStore { store.imageCreation }
     private var isBuilding: Bool { store.mode == .buildISO }
-    private var issue: String? {
-        isBuilding ? job.buildIssue : ImagePreflight.copyIssue(device: store.selectedDevice)
-    }
+    private var issue: String? { store.imageCreationIssue }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,23 +14,26 @@ struct ImageWorkspaceView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(store.mode.title).font(.title2.bold())
-                        Text(isBuilding ? "将文件和文件夹整理成可挂载、可刻录的数据光盘镜像。" : "读取光驱中的数据光盘，保存到 Mac。")
+                        Text(isBuilding ? "将文件和文件夹整理成可挂载、可刻录的数据光盘镜像。" : "每台光驱独立提取；切换设备查看进度，其他任务继续运行。")
                             .font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    if !isBuilding && store.sessions.count > 1 {
+                        DiscCopyOverviewView(store: store)
                     }
                     HStack(alignment: .top, spacing: 20) {
                         VStack(spacing: 18) {
                             if isBuilding {
-                                ImageSourcesView(job: job, disabled: store.isBusy)
-                                DataImageOptionsView(job: job).disabled(store.isBusy)
+                                ImageSourcesView(job: job, disabled: job.isBusy || store.isDemo)
+                                DataImageOptionsView(job: job).disabled(job.isBusy || store.isDemo)
                             } else {
-                                DiscCopyOptionsView(store: store).disabled(store.isBusy)
+                                DiscCopyOptionsView(store: store)
                                 DeviceInfoView(device: store.selectedDevice)
                             }
                         }.frame(width: 390)
                         VStack(spacing: 18) {
                             imageProgress
                             imageLog
-                        }.frame(maxWidth: .infinity)
+                        }.id(ObjectIdentifier(job)).frame(maxWidth: .infinity)
                     }
                 }.padding(24)
             }
@@ -50,7 +51,7 @@ struct ImageWorkspaceView: View {
                 }
                 Spacer()
                 if job.isBusy {
-                    Button("取消任务", role: .destructive) { job.cancel() }
+                    Button(isBuilding ? "取消任务" : "停止此光驱", role: .destructive) { job.cancel() }
                         .disabled(job.isCancelling).controlSize(.large)
                 } else {
                     Button {
@@ -59,7 +60,7 @@ struct ImageWorkspaceView: View {
                         Label(isBuilding ? "创建 ISO…" : "保存光盘镜像…", systemImage: "square.and.arrow.down")
                     }
                     .buttonStyle(.borderedProminent).controlSize(.large)
-                    .disabled(issue != nil || store.isBusy || store.isLoadingImage || store.isDemo)
+                    .disabled(issue != nil)
                 }
             }
             .padding(.horizontal, 24).padding(.vertical, 18).background(.bar)
@@ -100,8 +101,19 @@ struct ImageWorkspaceView: View {
                     } ?? "正在计算")
             Text(job.status.detail).font(.subheadline).foregroundStyle(.secondary)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                .id(job.status.detail)
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 VStack(spacing: 10) {
+                    if !isBuilding {
+                        KeyValueRow(label: "读取速度", value: job.readSpeedLabel())
+                        if let bytes = job.readBytes, let total = job.totalReadBytes {
+                            KeyValueRow(
+                                label: "已读取 / 总容量",
+                                value:
+                                    "\(BurnFormat.bytes(Int64(clamping: bytes))) / \(BurnFormat.bytes(Int64(clamping: total)))"
+                            )
+                        }
+                    }
                     KeyValueRow(label: "已用时间", value: BurnFormat.duration(job.elapsed(at: context.date)))
                     KeyValueRow(label: "本阶段预计剩余", value: job.remainingTime(at: context.date))
                 }
@@ -112,7 +124,7 @@ struct ImageWorkspaceView: View {
                     Button("用于刻录") {
                         store.mode = .burn
                         store.selectImage(output)
-                    }.disabled(store.isBusy)
+                    }.disabled(!store.canEditSelectedSession)
                 }.padding(.top, 4)
             }
             if job.isBusy && job.status.progress == nil {
@@ -232,16 +244,17 @@ private struct DiscCopyOptionsView: View {
             HStack {
                 Text("光盘驱动器").font(.subheadline)
                 Spacer()
-                Button("刷新") { store.refreshDevices() }
+                Button("刷新") { store.refreshDevices() }.disabled(store.isDemo)
             }
-            if store.devices.isEmpty {
+            if store.sessions.allSatisfy({ $0.deviceID.isEmpty }) {
                 Text("连接光驱并插入数据光盘后，设备会出现在这里。")
                     .font(.subheadline).foregroundStyle(.secondary)
             } else {
                 Picker("来源光驱", selection: $store.selectedDeviceID) {
-                    ForEach(store.devices) { Text($0.name).tag($0.id) }
-                }.labelsHidden()
+                    ForEach(store.sessions) { Text(store.label(for: $0)).tag($0.deviceID) }
+                }.labelsHidden().disabled(store.isDemo)
                 if let device = store.selectedDevice {
+                    KeyValueRow(label: "光盘标签", value: device.volumeName ?? "未提供标签")
                     KeyValueRow(label: "介质", value: device.media)
                     Text(device.status).font(.caption).foregroundStyle(.secondary)
                 }
@@ -249,6 +262,9 @@ private struct DiscCopyOptionsView: View {
             Divider()
             Picker("镜像格式", selection: $job.copyFormat) {
                 ForEach(DiscCopyFormat.allCases, id: \.self) { Text($0.title).tag($0) }
+            }.disabled(job.isBusy || store.isDemo)
+            if let request = store.discCopyRequest(for: store.selectedSession) {
+                KeyValueRow(label: "默认文件名", value: request.suggestedFileName)
             }
             Text("读取 ISO 9660 / UDF 数据光盘的扇区。暂不支持音频 CD、混合轨道、多会话或受保护光盘。")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

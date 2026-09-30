@@ -39,6 +39,7 @@ public struct DiscDevice: Identifiable, Sendable, Equatable {
     public let location: String?
     public let writableMedia: [String]
     public let mediaBSDName: String?
+    public let volumeName: String?
     public let mediaTrackCount: Int
     public let mediaSessionCount: Int
 
@@ -67,6 +68,8 @@ public struct DiscDevice: Identifiable, Sendable, Equatable {
         location = Self.hardwareText(dictionary["location"])
         writableMedia = (dictionary["writableMedia"] as? [String] ?? []).compactMap(Self.hardwareText)
         mediaBSDName = Self.hardwareText(dictionary["mediaBSDName"])
+        let label = (dictionary["volumeName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        volumeName = label.flatMap { $0.isEmpty ? nil : $0 }
         mediaTrackCount = (dictionary["mediaTrackCount"] as? NSNumber)?.intValue ?? 0
         mediaSessionCount = (dictionary["mediaSessionCount"] as? NSNumber)?.intValue ?? 0
     }

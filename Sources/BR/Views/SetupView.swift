@@ -72,7 +72,7 @@ struct SetupView: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(store.image == nil || store.isDemo || store.imageCreation.isBusy)
+                        .disabled(store.image == nil || store.isDemo)
                         Text("选择一次镜像，勾选两台或更多刻录机同时写入。不同镜像可分别设置。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
@@ -114,7 +114,6 @@ struct SetupView: View {
                             }
                             .pickerStyle(.menu).labelsHidden().lineLimit(1).truncationMode(.middle)
                             .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
-                            .disabled(store.imageCreation.isBusy)
                             .help(store.selectedDevice?.name ?? "选择刻录设备")
                             Group {
                                 if let device = store.selectedDevice {

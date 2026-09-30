@@ -15,6 +15,7 @@ public struct BurnRequest: Equatable, Sendable {
 @MainActor @Observable
 public final class BurnSession: Identifiable {
     public let id = UUID()
+    public let discCopy: ImageCreationStore
     public private(set) var deviceID = ""
     public private(set) var deviceName = "未选择设备"
     public private(set) var device: DiscDevice?
@@ -39,7 +40,8 @@ public final class BurnSession: Identifiable {
     @ObservationIgnored private var scopedURL: URL?
     @ObservationIgnored private var speedDiagnostics = BurnSpeedDiagnostics()
     @ObservationIgnored private var omittedSpeedLogs = 0
-    init(engine: any BurnSessionEngine) {
+    init(engine: any BurnSessionEngine, imageService: any ImageFileServicing = ImageFileService()) {
+        discCopy = ImageCreationStore(service: imageService)
         self.engine = engine
         engine.onStatus = { [weak self] update in
             guard let self, self.isBusy else { return }
@@ -52,7 +54,10 @@ public final class BurnSession: Identifiable {
     }
 
     public var isBusy: Bool { snapshot.phase.isActive }
-    public var preflightIssue: String? { BurnPreflight.issue(image: image, device: device, options: options) }
+    public var preflightIssue: String? {
+        if discCopy.isBusy { return "此光驱正在提取镜像。" }
+        return BurnPreflight.issue(image: image, device: device, options: options)
+    }
     public var canBurn: Bool { !isDemo && !isBusy && !isLoadingImage && preflightIssue == nil }
     public var burnRequest: BurnRequest? {
         guard canBurn, let image else { return nil }
@@ -73,7 +78,7 @@ public final class BurnSession: Identifiable {
     }
 
     func selectImage(_ url: URL, completion: (@MainActor (Bool) -> Void)? = nil) {
-        guard !isBusy, !isDemo else {
+        guard !isBusy, !discCopy.isBusy, !isDemo else {
             completion?(false)
             return
         }
@@ -153,7 +158,7 @@ public final class BurnSession: Identifiable {
     }
 
     func eject() {
-        guard !isBusy, !isDemo else { return }
+        guard !isBusy, !discCopy.isBusy, !isDemo else { return }
         do { try engine.eject(deviceID) } catch { errorMessage = error.localizedDescription }
     }
 

@@ -20,6 +20,39 @@ struct ImageCreationTests {
         }
     }
 
+    @Test func sourceReadFailureReportsDeviceProblemInsteadOfSaveFailure() {
+        let source = URL(fileURLWithPath: "/dev/rdisk8")
+        for (code, message) in [
+            (POSIXErrorCode.EBUSY, "占用"), (.EACCES, "权限"), (.EIO, "I/O"), (.ENXIO, "不可用"),
+        ] {
+            let underlying = NSError(domain: NSPOSIXErrorDomain, code: Int(code.rawValue))
+            let cocoa = NSError(
+                domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError,
+                userInfo: [NSUnderlyingErrorKey: underlying, NSFilePathErrorKey: "/dev/disk8"])
+            let error = DiscSourceReadError(source: source, underlyingError: cocoa)
+            #expect(error.localizedDescription.contains("无法读取来源光盘"))
+            #expect(error.localizedDescription.contains(source.path))
+            #expect(error.localizedDescription.contains(message))
+            #expect(!error.localizedDescription.contains("保存"))
+        }
+    }
+
+    @Test func copyRejectsDevicePathsThatAreNotWholeDiscBSDNames() async {
+        for name in ["rdisk8", "disk8s1", "/dev/disk8", "disk8/other", "../disk8"] {
+            let device = DiscDevice(dictionary: [
+                "id": "invalid", "present": true, "blank": false, "mediaBSDName": name,
+            ])
+            do {
+                try await ImageFileService().copyDisc(
+                    device: device, format: .iso, destination: URL(fileURLWithPath: "/unused.iso")
+                ) { _ in }
+                Issue.record("Invalid device name unexpectedly accepted")
+            } catch {
+                #expect(error.localizedDescription.contains("有效的完整光盘设备地址"))
+            }
+        }
+    }
+
     @Test func rejectsOverlappingDestinationsAndRootNameCollisions() throws {
         let a = URL(fileURLWithPath: "/tmp/example/content")
         let b = URL(fileURLWithPath: "/tmp/another/CONTENT")
@@ -83,13 +116,14 @@ struct ImageCreationTests {
         #expect(Date().timeIntervalSince(start) < 5)
     }
 
-    @MainActor @Test func imageTaskLocksBurnDemoAndEditing() async throws {
+    @MainActor @Test func imageTaskLocksItsOwnInputsAndDemoEntry() async throws {
         let store = BurnStore()
         let job = store.imageCreation
         job.addSources([URL(fileURLWithPath: "/nonexistent/source")])
         store.mode = .buildISO
         store.createImage(to: FileManager.default.temporaryDirectory.appendingPathComponent("unused-\(UUID()).iso"))
         #expect(store.isBusy)
+        #expect(store.canEditSelectedSession)
         #expect(!store.canBurn)
         store.startDemo()
         #expect(!store.isDemo)
@@ -193,7 +227,8 @@ struct ImageFileIntegrationTests {
         }
     }
 
-    @Test func copiesVirtualDataDiscToAllSupportedFormats() async throws {
+    @Test(arguments: [false, true])
+    func copiesVirtualDataDiscToAllSupportedFormats(mounted: Bool) async throws {
         let root = try temporaryDirectory()
         defer { try? files.removeItem(at: root) }
         let source = root.appendingPathComponent("payload.txt")
@@ -205,8 +240,11 @@ struct ImageFileIntegrationTests {
             sources: [source], volumeName: "Copy Test", fileSystem: .isoJoliet, destination: original
         ) { _ in }
         let runner = ImageCommandRunner()
+        let sourceMount = root.appendingPathComponent("source-mount")
+        try files.createDirectory(at: sourceMount, withIntermediateDirectories: false)
+        let mountArguments = mounted ? ["-nobrowse", "-mountpoint", sourceMount.path] : ["-nomount"]
         let attachment = try await runner.run(
-            "/usr/bin/hdiutil", arguments: ["attach", "-readonly", "-nomount", "-plist", original.path])
+            "/usr/bin/hdiutil", arguments: ["attach", "-readonly", "-plist"] + mountArguments + [original.path])
         // New macOS versions prepend a deprecation notice before the property list.
         let xmlStart = try #require(attachment.range(of: Data("<?xml".utf8)))
         let plist =
@@ -243,12 +281,65 @@ struct ImageFileIntegrationTests {
                     _ = try? await runner.run("/usr/bin/hdiutil", arguments: ["detach", mount.path])
                     throw error
                 }
+                if mounted {
+                    #expect(try Data(contentsOf: sourceMount.appendingPathComponent("payload.txt")) == payload)
+                }
             }
+            try await checkCancelledDiscCopy(device: device, root: root)
             _ = try await runner.run("/usr/bin/hdiutil", arguments: ["detach", node])
         } catch {
             _ = try? await runner.run("/usr/bin/hdiutil", arguments: ["detach", node])
             throw error
         }
+        #expect(try files.contentsOfDirectory(atPath: root.path).allSatisfy { !$0.hasPrefix(".DiscStudio-") })
+    }
+
+    // Explicitly opt in to a read-only hardware check; normal test runs use virtual discs only.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["BR_TEST_OPTICAL_DEVICE"] != nil))
+    func mountedPhysicalDiscReadsSectorsAndCancelsCleanly() async throws {
+        let name = try #require(ProcessInfo.processInfo.environment["BR_TEST_OPTICAL_DEVICE"])
+        #expect(name.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil)
+        let runner = ImageCommandRunner()
+        let infoData = try await runner.run("/usr/sbin/diskutil", arguments: ["info", "-plist", "/dev/\(name)"])
+        let info = try PropertyListSerialization.propertyList(from: infoData, format: nil) as? [String: Any]
+        _ = try #require(info?["OpticalMediaType"] as? String)
+        let mount = try #require(info?["MountPoint"] as? String)
+        #expect(!mount.isEmpty)
+        let root = try temporaryDirectory()
+        defer { try? files.removeItem(at: root) }
+        let device = DiscDevice(dictionary: [
+            "id": "optical-hardware", "name": "Optical Hardware Test", "present": true, "blank": false,
+            "mediaBSDName": name, "mediaTrackCount": 1, "mediaSessionCount": 1,
+        ])
+        try await checkCancelledDiscCopy(device: device, root: root)
+        let afterData = try await runner.run("/usr/sbin/diskutil", arguments: ["info", "-plist", "/dev/\(name)"])
+        let after = try PropertyListSerialization.propertyList(from: afterData, format: nil) as? [String: Any]
+        #expect(after?["MountPoint"] as? String == mount)
+    }
+
+    private func checkCancelledDiscCopy(device: DiscDevice, root: URL) async throws {
+        let output = root.appendingPathComponent("cancelled.iso")
+        let original = Data("preserve existing image".utf8)
+        try original.write(to: output)
+        let recorder = ImageUpdateRecorder()
+        let task = Task {
+            try await ImageFileService().copyDisc(device: device, format: .iso, destination: output) {
+                await recorder.record($0)
+                if $0.phase == .copying, ($0.progress ?? 0) > 0 {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+        }
+        do {
+            try await task.value
+            Issue.record("Cancelled disc copy unexpectedly succeeded")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        let updates = await recorder.values
+        #expect(updates.contains { $0.phase == .copying && ($0.progress ?? 0) > 0 })
+        #expect(!updates.contains { $0.phase == .finishing })
+        #expect(try Data(contentsOf: output) == original)
         #expect(try files.contentsOfDirectory(atPath: root.path).allSatisfy { !$0.hasPrefix(".DiscStudio-") })
     }
 

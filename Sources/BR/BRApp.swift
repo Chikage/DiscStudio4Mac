@@ -31,9 +31,9 @@ struct BRApp: App {
                 Button("打开光盘镜像…") { FilePanels.chooseImage(store: store) }
                     .keyboardShortcut("o").disabled(!store.canEditSelectedSession)
                 Button("从光盘创建镜像") { store.mode = .copyDisc }
-                    .disabled(store.isBusy || store.isDemo || store.isLoadingImage)
+                    .disabled(store.isDemo)
                 Button("从文件创建 ISO") { store.mode = .buildISO }
-                    .keyboardShortcut("n").disabled(store.isBusy || store.isDemo || store.isLoadingImage)
+                    .keyboardShortcut("n").disabled(store.isDemo)
             }
             CommandMenu("刻录") {
                 Button("刷新刻录设备") { store.refreshDevices() }
@@ -110,18 +110,41 @@ enum FilePanels {
     }
 
     static func saveImage(store: BurnStore) {
-        guard !store.isBusy, !store.isLoadingImage, !store.isDemo else { return }
+        guard store.mode != .burn, store.imageCreationIssue == nil else { return }
         let mode = store.mode
         let job = store.imageCreation
+        let request = mode == .copyDisc ? store.discCopyRequest(for: store.selectedSession) : nil
         let extensionName = mode == .buildISO ? "iso" : job.copyFormat.rawValue
         let panel = NSSavePanel()
         panel.title = mode == .buildISO ? "创建数据光盘 ISO" : "保存光盘镜像"
-        panel.nameFieldStringValue = mode == .buildISO ? "\(job.volumeName).iso" : "光盘副本.\(extensionName)"
+        panel.nameFieldStringValue =
+            mode == .buildISO ? "\(job.volumeName).iso" : request?.suggestedFileName ?? "光盘副本.\(extensionName)"
         panel.allowedContentTypes = [UTType(filenameExtension: extensionName) ?? .diskImage]
         panel.canCreateDirectories = true
         panel.begin { result in
-            guard result == .OK, let url = panel.url, store.mode == mode else { return }
-            store.createImage(to: url)
+            guard result == .OK, let url = panel.url else { return }
+            if let request {
+                store.createDiscImage(request, to: url)
+            } else {
+                store.createDataImage(to: url)
+            }
+        }
+    }
+
+    static func saveDiscImages(store: BurnStore) {
+        let requests = store.readyDiscCopyRequests
+        guard !requests.isEmpty else { return }
+        let panel = NSOpenPanel()
+        panel.title = "提取 \(requests.count) 台光驱的镜像"
+        panel.message = "选择保存文件夹。每台按光盘标签命名，重名时自动加序号。"
+        panel.prompt = "开始提取"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.begin { result in
+            guard result == .OK, let directory = panel.url else { return }
+            store.createDiscImages(requests, in: directory)
         }
     }
 

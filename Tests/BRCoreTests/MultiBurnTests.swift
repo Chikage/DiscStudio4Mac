@@ -46,21 +46,58 @@ private final class ControlledBurnEngine: BurnSessionEngine {
     }
 }
 
+private actor CrossModeImageService: ImageFileServicing {
+    private var operations: [URL: CheckedContinuation<Void, any Error>] = [:]
+    var pendingCount: Int { operations.count }
+
+    func build(
+        sources: [URL], volumeName: String, fileSystem: DataDiscFileSystem, destination: URL,
+        update: @Sendable (ImageUpdate) async -> Void
+    ) async throws {
+        await update(ImageUpdate(.building, "文件镜像测试进度", progress: 0.3))
+        try await waitForCompletion(destination)
+    }
+
+    func copyDisc(
+        device: DiscDevice, format: DiscCopyFormat, destination: URL,
+        update: @Sendable (ImageUpdate) async -> Void
+    ) async throws {
+        await update(ImageUpdate(.copying, "光盘提取测试进度", progress: 0.6))
+        try await waitForCompletion(destination)
+    }
+
+    private func waitForCompletion(_ destination: URL) async throws {
+        try await withCheckedThrowingContinuation { operations[destination] = $0 }
+        // Cancellation keeps the resource reserved until simulated cleanup is complete.
+        try Task.checkCancellation()
+    }
+
+    func finish(_ destination: URL, fails: Bool = false) {
+        let continuation = operations.removeValue(forKey: destination)
+        if fails {
+            continuation?.resume(throwing: CocoaError(.fileReadUnknown))
+        } else {
+            continuation?.resume()
+        }
+    }
+}
+
 @MainActor
 struct MultiBurnTests {
-    private func device(_ id: String, busy: Bool = false) -> DiscDevice {
+    private func device(_ id: String, busy: Bool = false, readable: Bool = false) -> DiscDevice {
         DiscDevice(dictionary: [
-            "id": id, "name": "同型号刻录机", "present": true, "blank": true,
+            "id": id, "name": "同型号刻录机", "present": true, "blank": !readable,
             "busy": busy, "canWrite": true, "freeBlocks": 1000, "speeds": [5540.0, 11080.0],
+            "mediaBSDName": "disk42", "volumeName": id,
         ])
     }
-    private func setup() -> (BurnStore, [ControlledBurnEngine]) {
+    private func setup(imageService: (any ImageFileServicing)? = nil) -> (BurnStore, [ControlledBurnEngine]) {
         var engines: [ControlledBurnEngine] = []
         let store = BurnStore(makeEngine: {
             let engine = ControlledBurnEngine()
             engines.append(engine)
             return engine
-        })
+        }, makeImageService: { imageService ?? ImageFileService() })
         store.updateDevices([device("A"), device("B"), device("C")])
         return (store, engines)
     }
@@ -106,16 +143,241 @@ struct MultiBurnTests {
         #expect(engines[1].ejections.isEmpty)
         #expect(store.options.verify)
 
-        // Switching away does not hide global activity from quit/image-creation protection.
+        // Switching modes does not hide global activity from quit protection.
         store.selectedDeviceID = "C"
         #expect(store.canEditSelectedSession && store.isBusy)
         store.mode = .buildISO
-        store.createImage(to: URL(fileURLWithPath: "/unused.iso"))
-        #expect(!store.imageCreation.isBusy)
         engines[0].send(.completed, progress: 1)
         #expect(store.isBusy)
         engines[1].send(.completed, progress: 1)
         #expect(!store.isBusy)
+    }
+
+    private func waitUntil(_ condition: @MainActor () async -> Bool) async throws {
+        for _ in 0..<200 {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let completed = await condition()
+        try #require(completed, "Timed out waiting for the controlled operation")
+    }
+
+    @Test func burningCopyingAndBuildingKeepIndependentProgressAndCancellation() async throws {
+        let service = CrossModeImageService()
+        let (store, engines) = setup(imageService: service)
+        load("/burn.iso", on: "A", store: store, engine: engines[0])
+        store.startBurn()
+        engines[0].send(.writing, progress: 0.2)
+        // Even a stale device report must not allow reads from a drive being burned.
+        store.updateDevices([device("A", readable: true), device("B", readable: true), device("C")])
+        store.mode = .copyDisc
+        #expect(store.imageCreationIssue?.contains("刻录") == true)
+        store.selectedDeviceID = "B"
+        #expect(store.imageCreationIssue == nil)
+        let copy = store.imageCreation
+        let copyURL = URL(fileURLWithPath: "/tmp/cross-mode-copy.iso")
+        store.createImage(to: copyURL)
+        store.mode = .buildISO
+        let build = store.imageCreation
+        build.addSources([URL(fileURLWithPath: "/test-source")])
+        #expect(store.imageCreationIssue == nil)
+        let buildURL = URL(fileURLWithPath: "/tmp/cross-mode-build.iso")
+        store.createImage(to: buildURL)
+        try await waitUntil { await service.pendingCount == 2 }
+        #expect(store.activeBurnCount == 1 && store.activeDiscCopyCount == 1 && build.isBusy)
+        #expect(copy.status.progress == 0.6 && build.status.progress == 0.3)
+        store.mode = .burn
+        store.selectedDeviceID = "A"
+        #expect(store.snapshot.progress == 0.2)
+        store.mode = .copyDisc
+        store.selectedDeviceID = "B"
+        #expect(store.imageCreation === copy)
+        copy.cancel()
+        #expect(copy.isBusy && copy.isCancelling)
+        #expect(store.discCopyRequest(for: store.selectedSession) == nil)
+        engines[0].send(.verifying, progress: 0.7)
+        await service.finish(copyURL)
+        try await waitUntil { !copy.isBusy }
+        #expect(copy.status.phase == .cancelled && copy.outputURL == nil)
+        #expect(build.isBusy && store.activeBurnCount == 1)
+        await service.finish(buildURL, fails: true)
+        try await waitUntil { !build.isBusy }
+        #expect(build.status.phase == .failed && store.isBusy)
+        store.selectedDeviceID = "A"
+        #expect(store.snapshot.phase == .verifying && store.snapshot.progress == 0.7)
+        engines[0].send(.completed, progress: 1)
+        #expect(!store.isBusy)
+    }
+
+    @Test func imageJobsAllowSharedBurnPreparationAndStartsOnOtherDevices() async throws {
+        let service = CrossModeImageService()
+        let (store, engines) = setup(imageService: service)
+        store.updateDevices([device("A"), device("B"), device("C", readable: true)])
+        let copyURL = URL(fileURLWithPath: "/tmp/shared-burn-copy.iso")
+        let buildURL = URL(fileURLWithPath: "/tmp/shared-burn-build.iso")
+        store.dataImageCreation.addSources([URL(fileURLWithPath: "/source")])
+        store.createDataImage(to: buildURL)
+        store.selectedDeviceID = "C"
+        store.mode = .copyDisc
+        store.createImage(to: copyURL)
+        load("/burn.iso", on: "A", store: store, engine: engines[0])
+        store.mode = .burn
+        #expect(store.canBurn)
+        store.applyImageToOtherDevices()
+        #expect(engines[1].preparations.count == 1 && engines[2].preparations.isEmpty)
+        engines[1].finishPreparing()
+        #expect(store.readySessions.map(\.deviceID) == ["A", "B"])
+        let image = try #require(store.image)
+        var completed = false
+        store.startSharedImageBurn(image: image, targetIDs: Set(store.sessions.prefix(2).map(\.id))) {
+            #expect($0 == nil)
+            completed = true
+        }
+        engines[0].finishPreparing(1)
+        #expect(store.discCopyIssue(for: store.sessions[0])?.contains("准备") == true)
+        #expect(!store.canEditSelectedSession && !completed)
+        engines[1].finishPreparing(1)
+        #expect(completed && store.activeBurnCount == 2)
+        #expect(store.activeDiscCopyCount == 1 && store.dataImageCreation.isBusy)
+        try await waitUntil { await service.pendingCount == 2 }
+        await service.finish(buildURL)
+        await service.finish(copyURL)
+        try await waitUntil { !store.isCreatingImage }
+        #expect(store.isBusy && store.dataImageCreation.outputURL == buildURL)
+        engines[0].send(.completed)
+        engines[1].send(.completed)
+        #expect(!store.isBusy)
+    }
+
+    @Test func copyingReservesOnlyItsDriveUntilCancellationCleanupFinishes() async throws {
+        let service = CrossModeImageService()
+        let (store, engines) = setup(imageService: service)
+        load("/burn.iso", on: "A", store: store, engine: engines[0])
+        let request = try #require(store.selectedSession.burnRequest)
+        let image = try #require(store.image)
+        store.updateDevices([device("A", readable: true), device("B"), device("C")])
+        store.mode = .copyDisc
+        let copyURL = URL(fileURLWithPath: "/tmp/reserved-copy.iso")
+        store.createImage(to: copyURL)
+        let copy = store.imageCreation
+        try await waitUntil { await service.pendingCount == 1 }
+        store.updateDevices([device("A"), device("B"), device("C")])
+        for cancelling in [false, true] {
+            if cancelling { copy.cancel() }
+            store.mode = .burn
+            #expect(!store.canBurn && !store.canEditSelectedSession)
+            #expect(store.preflightIssue?.contains("提取") == true)
+            #expect(store.selectedSession.burnRequest == nil)
+            #expect(store.sharedImageIssue(image, for: store.selectedSession) != nil)
+            store.startBurns([request])
+            store.selectImage(URL(fileURLWithPath: "/must-not-replace.iso"))
+            store.eject()
+            #expect(engines[0].starts.isEmpty && engines[0].ejections.isEmpty)
+            #expect(engines[0].preparations.count == 1)
+        }
+        load("/other.iso", on: "B", store: store, engine: engines[1])
+        store.startBurn()
+        #expect(engines[1].starts.count == 1 && store.isBusy)
+        await service.finish(copyURL)
+        try await waitUntil { !copy.isBusy }
+        store.selectedDeviceID = "A"
+        #expect(store.canBurn && store.canEditSelectedSession)
+        store.startBurns([request])
+        #expect(engines[0].starts.count == 1)
+        engines[0].send(.completed)
+        engines[1].send(.completed)
+        #expect(!store.isBusy)
+    }
+
+    @Test(arguments: [false, true])
+    func buildingAndCopyingCannotShareAnActiveDestination(copyFirst: Bool) async throws {
+        let service = CrossModeImageService()
+        let (store, _) = setup(imageService: service)
+        store.updateDevices([device("A", readable: true)])
+        let request = try #require(store.discCopyRequest(for: store.selectedSession))
+        let destination = URL(fileURLWithPath: "/tmp/cross-mode-conflict.iso")
+        let alias = URL(fileURLWithPath: "/tmp/CROSS-MODE-CONFLICT.iso")
+        store.dataImageCreation.addSources([URL(fileURLWithPath: "/source")])
+        let first = copyFirst ? store.selectedSession.discCopy : store.dataImageCreation
+        let second = copyFirst ? store.dataImageCreation : store.selectedSession.discCopy
+        if copyFirst {
+            store.createDiscImage(request, to: destination)
+            store.createDataImage(to: alias)
+        } else {
+            store.createDataImage(to: destination)
+            store.createDiscImage(request, to: alias)
+        }
+        #expect(first.isBusy && !second.isBusy)
+        #expect(second.errorMessage?.contains("同一位置") == true)
+        try await waitUntil { await service.pendingCount == 1 }
+        await service.finish(destination)
+        try await waitUntil { !first.isBusy }
+        if copyFirst {
+            store.createDataImage(to: alias)
+        } else {
+            store.createDiscImage(request, to: alias)
+        }
+        #expect(second.isBusy && second.errorMessage == nil)
+        try await waitUntil { await service.pendingCount == 1 }
+        await service.finish(alias)
+        try await waitUntil { !store.isBusy }
+        #expect(second.outputURL == alias)
+    }
+
+    @Test func imageOutputsCannotReplaceReservedBurnSourcesOrBeBurnedWhileSaving() async throws {
+        let service = CrossModeImageService()
+        let (store, engines) = setup(imageService: service)
+        store.updateDevices([device("A"), device("B", readable: true), device("C")])
+        load("/tmp/protected-burn.iso", on: "A", store: store, engine: engines[0])
+        let image = try #require(store.image)
+        let copyRequest = try #require(store.discCopyRequest(for: store.sessions[1]))
+        store.dataImageCreation.addSources([URL(fileURLWithPath: "/source")])
+        store.startSharedImageBurn(image: image, targetIDs: [store.selectedSession.id]) { #expect($0 == nil) }
+        store.createDataImage(to: image.url)
+        #expect(!store.dataImageCreation.isBusy)
+        #expect(store.dataImageCreation.errorMessage?.contains("用于刻录") == true)
+        engines[0].finishPreparing(1)
+        #expect(store.activeBurnCount == 1)
+        store.createDataImage(to: image.url)
+        store.createDiscImage(copyRequest, to: image.url)
+        #expect(!store.isCreatingImage)
+        #expect(store.sessions[1].discCopy.errorMessage?.contains("用于刻录") == true)
+        engines[0].send(.completed)
+        let burnRequest = try #require(store.selectedSession.burnRequest)
+        store.createDataImage(to: image.url)
+        #expect(store.dataImageCreation.isBusy)
+        #expect(!store.canBurn && store.readySessions.isEmpty)
+        #expect(store.preflightIssue?.contains("正在生成或替换") == true)
+        #expect(store.sharedImageIssue(image, for: store.selectedSession) != nil)
+        store.startBurns([burnRequest])
+        #expect(engines[0].starts.count == 1)
+        try await waitUntil { await service.pendingCount == 1 }
+        await service.finish(image.url)
+        try await waitUntil { !store.isBusy }
+    }
+
+    @Test func savedCopyRequestSurvivesTabSwitchButRechecksDriveReservation() async throws {
+        let service = CrossModeImageService()
+        let (store, engines) = setup(imageService: service)
+        store.updateDevices([device("A", readable: true), device("B"), device("C")])
+        let request = try #require(store.discCopyRequest(for: store.selectedSession))
+        store.mode = .buildISO
+        store.selectedDeviceID = "B"
+        let destination = URL(fileURLWithPath: "/tmp/captured-copy.iso")
+        store.createDiscImage(request, to: destination)
+        let copy = store.sessions[0].discCopy
+        #expect(copy.isBusy && copy.copySource?.id == "A")
+        #expect(!store.selectedSession.discCopy.isBusy)
+        try await waitUntil { await service.pendingCount == 1 }
+        await service.finish(destination)
+        try await waitUntil { !copy.isBusy }
+        store.updateDevices([device("A"), device("B"), device("C")])
+        load("/burn.iso", on: "A", store: store, engine: engines[0])
+        store.startBurn()
+        store.updateDevices([device("A", readable: true), device("B"), device("C")])
+        store.createDiscImage(request, to: destination)
+        #expect(!copy.isBusy && copy.errorMessage?.contains("刻录") == true)
+        engines[0].send(.completed)
     }
 
     @Test func diagnosticLogsStayWithTheirDeviceAndRetainStartupAfterManySamples() throws {

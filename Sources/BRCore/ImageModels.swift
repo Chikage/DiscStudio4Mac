@@ -23,6 +23,31 @@ public enum DiscCopyFormat: String, CaseIterable, Sendable {
     }
 }
 
+/// A save panel keeps its original drive and format even if the selection changes while it is open.
+public struct DiscCopyRequest: Sendable, Equatable {
+    public let device: DiscDevice
+    public let format: DiscCopyFormat
+    public var suggestedFileName: String { DiscImageName.fileName(label: device.volumeName, format: format) }
+}
+
+enum DiscImageName {
+    static func fileName(label: String?, format: DiscCopyFormat) -> String {
+        let forbidden = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/:"))
+        var name = (label ?? "").components(separatedBy: forbidden).joined(separator: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+        // Leave room for the extension and batch collision suffix within the filesystem's byte limit.
+        while name.utf8.count > 180 { name.removeLast() }
+        if name.isEmpty { name = "光盘副本" }
+        return "\(name).\(format.rawValue)"
+    }
+
+    static func destinationKey(_ url: URL) -> String {
+        // Resolve the existing parent first; Foundation leaves /tmp aliases intact when the leaf is absent.
+        url.deletingLastPathComponent().resolvingSymlinksInPath().appendingPathComponent(url.lastPathComponent)
+            .standardizedFileURL.path.precomposedStringWithCanonicalMapping.lowercased()
+    }
+}
+
 public enum DataDiscFileSystem: String, CaseIterable, Sendable {
     case isoJoliet, udf
     public var title: String {
@@ -62,11 +87,49 @@ public struct ImageUpdate: Sendable {
     public let detail: String
     public let progress: Double?
     public let isProgressEstimated: Bool
-    public init(_ phase: ImagePhase, _ detail: String, progress: Double? = nil, isProgressEstimated: Bool = false) {
+    public let readBytes: UInt64?
+    public let totalReadBytes: UInt64?
+    public init(
+        _ phase: ImagePhase, _ detail: String, progress: Double? = nil, isProgressEstimated: Bool = false,
+        readBytes: UInt64? = nil, totalReadBytes: UInt64? = nil
+    ) {
         self.phase = phase
         self.detail = detail
         self.progress = progress
         self.isProgressEstimated = isProgressEstimated
+        self.readBytes = readBytes
+        self.totalReadBytes = totalReadBytes
+    }
+}
+
+/// Throughput uses actual sector bytes and a monotonic clock, never an estimated build percentage.
+struct DiscReadSpeedEstimator {
+    private var baseline: (bytes: UInt64, total: UInt64, seconds: TimeInterval)?
+    private var lastUpdate: TimeInterval?
+    private var bytesPerSecond: Double?
+
+    mutating func update(bytes: UInt64, total: UInt64, at seconds: TimeInterval) {
+        guard total > 0, bytes <= total, seconds.isFinite else {
+            self = Self()
+            return
+        }
+        let current = (bytes, total, seconds)
+        guard let baseline, baseline.total == total, bytes >= baseline.bytes, seconds >= baseline.seconds else {
+            self.baseline = current
+            lastUpdate = seconds
+            bytesPerSecond = nil
+            return
+        }
+        lastUpdate = seconds
+        let interval = seconds - baseline.seconds
+        guard interval > 0, interval >= 1 || bytes == total else { return }
+        bytesPerSecond = Double(bytes - baseline.bytes) / interval
+        self.baseline = current
+    }
+
+    func speed(at seconds: TimeInterval) -> Double? {
+        guard let lastUpdate, seconds >= lastUpdate, seconds - lastUpdate <= 5 else { return nil }
+        return bytesPerSecond
     }
 }
 
@@ -98,6 +161,34 @@ struct ImageCreationError: LocalizedError {
     let message: String
     init(_ message: String) { self.message = message }
     var errorDescription: String? { message }
+}
+
+/// Foundation can describe a read-only device open failure as a file-save error.
+struct DiscSourceReadError: LocalizedError {
+    let source: URL
+    let underlyingError: NSError
+
+    var errorDescription: String? {
+        let cause = underlyingError.userInfo[NSUnderlyingErrorKey] as? NSError ?? underlyingError
+        let detail: String
+        if cause.domain == NSPOSIXErrorDomain {
+            switch POSIXErrorCode(rawValue: Int32(clamping: cause.code)) {
+            case .EBUSY:
+                detail = "光驱正被占用，请等待其他光盘任务结束后重试。"
+            case .EACCES, .EPERM:
+                detail = "系统拒绝读取光盘，请检查设备访问权限。"
+            case .ENXIO, .ENODEV, .ENOENT:
+                detail = "光驱或光盘已不可用，请重新连接设备并刷新。"
+            case .EIO:
+                detail = "光盘读取发生 I/O 错误，请检查光盘和光驱连接。"
+            default:
+                detail = "\(cause.localizedDescription)（\(cause.domain) \(cause.code)）"
+            }
+        } else {
+            detail = "系统错误：\(cause.domain) \(cause.code)。"
+        }
+        return "无法读取来源光盘（\(source.path)）。\(detail)"
+    }
 }
 
 public enum ImagePreflight {

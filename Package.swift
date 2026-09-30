@@ -9,7 +9,7 @@ let package = Package(
         .target(
             name: "DiscBridge", publicHeadersPath: "include",
             cSettings: [.unsafeFlags(["-fobjc-arc"])],
-            linkerSettings: [.linkedFramework("DiscRecording")]),
+            linkerSettings: [.linkedFramework("DiscRecording"), .linkedFramework("DiskArbitration")]),
         .target(name: "BRCore", dependencies: ["DiscBridge"]),
         .executableTarget(
             name: "BR", dependencies: ["BRCore"],

@@ -5,7 +5,8 @@ import Observation
 @MainActor @Observable
 public final class BurnStore {
     public var mode: StudioMode = .burn
-    public let imageCreation = ImageCreationStore()
+    public let dataImageCreation: ImageCreationStore
+    public var imageCreation: ImageCreationStore { mode == .copyDisc ? selectedSession.discCopy : dataImageCreation }
     public private(set) var devices: [DiscDevice] = []
     public var selectedDeviceID = ""
     public private(set) var sessions: [BurnSession]
@@ -13,6 +14,7 @@ public final class BurnStore {
 
     @ObservationIgnored private let deviceMonitor = BRDiscEngine()
     @ObservationIgnored private let makeEngine: () -> any BurnSessionEngine
+    @ObservationIgnored private let makeImageService: () -> any ImageFileServicing
     @ObservationIgnored private var didStart = false
     @ObservationIgnored private var savedSessions: [BurnSession] = []
     @ObservationIgnored private var savedDeviceID = ""
@@ -20,9 +22,14 @@ public final class BurnStore {
 
     public convenience init() { self.init(makeEngine: { NativeBurnSessionEngine() }) }
 
-    init(makeEngine: @escaping () -> any BurnSessionEngine) {
+    init(
+        makeEngine: @escaping () -> any BurnSessionEngine,
+        makeImageService: @escaping () -> any ImageFileServicing = { ImageFileService() }
+    ) {
         self.makeEngine = makeEngine
-        sessions = [BurnSession(engine: makeEngine())]
+        self.makeImageService = makeImageService
+        dataImageCreation = ImageCreationStore(service: makeImageService())
+        sessions = [BurnSession(engine: makeEngine(), imageService: makeImageService())]
     }
 
     public var selectedSession: BurnSession {
@@ -45,24 +52,30 @@ public final class BurnStore {
         get { selectedSession.errorMessage }
         set { selectedSession.errorMessage = newValue }
     }
-    /// App-wide activity is used for quitting, mode changes and image creation only.
-    public var isBusy: Bool { sessions.contains { $0.isBusy } || imageCreation.isBusy || sharedPreparation != nil }
+    /// App-wide activity protects quitting and demo entry; real tasks reserve only their own resources.
+    public var isBusy: Bool { sessions.contains { $0.isBusy } || isCreatingImage || sharedPreparation != nil }
+    public var isCreatingImage: Bool { dataImageCreation.isBusy || sessions.contains { $0.discCopy.isBusy } }
+    public var activeDiscCopyCount: Int { sessions.filter { $0.discCopy.isBusy }.count }
     public var isLoadingImage: Bool { sessions.contains { $0.isLoadingImage } }
     public var activeBurnCount: Int { sessions.filter { $0.isBusy }.count }
     public var canEditSelectedSession: Bool {
-        !isDemo && !imageCreation.isBusy && !selectedSession.isBusy && !isReserved(selectedSession)
+        canEdit(selectedSession)
     }
-    public var preflightIssue: String? { selectedSession.preflightIssue }
-    public var canBurn: Bool { canEditSelectedSession && selectedSession.canBurn }
+    private func canEdit(_ session: BurnSession) -> Bool {
+        !isDemo && !session.isBusy && !session.discCopy.isBusy && !isReserved(session)
+    }
+    public var preflightIssue: String? {
+        if isReserved(selectedSession) { return "此设备正在准备镜像。" }
+        return selectedSession.preflightIssue ?? imageWriteIssue(selectedSession.image)
+    }
+    public var canBurn: Bool { canEditSelectedSession && selectedSession.canBurn && preflightIssue == nil }
     public var readySessions: [BurnSession] {
-        guard !isDemo, !imageCreation.isBusy else { return [] }
-        return sessions.filter { $0.canBurn && !isReserved($0) }
+        sessions.filter { canEdit($0) && $0.canBurn && imageWriteIssue($0.image) == nil }
     }
     public var canApplyImageToOtherDevices: Bool { image != nil && !imageCopyTargets.isEmpty }
     private var imageCopyTargets: [BurnSession] {
-        guard !isDemo, !imageCreation.isBusy else { return [] }
         return sessions.filter {
-            $0.id != selectedSession.id && $0.device != nil && !$0.isBusy && !$0.isLoadingImage && !isReserved($0)
+            $0.id != selectedSession.id && $0.device != nil && canEdit($0) && !$0.isLoadingImage
         }
     }
 
@@ -83,7 +96,7 @@ public final class BurnStore {
             if let draft = sessions.first(where: { $0.deviceID.isEmpty }) {
                 draft.updateDevice(device)
             } else {
-                let session = BurnSession(engine: makeEngine())
+                let session = BurnSession(engine: makeEngine(), imageService: makeImageService())
                 session.updateDevice(device)
                 sessions.append(session)
             }
@@ -98,9 +111,8 @@ public final class BurnStore {
     public func refreshDevices() { if !isDemo { deviceMonitor.refreshDevices() } }
 
     public func selectImage(_ url: URL, sessionID: UUID? = nil) {
-        guard !isDemo, !imageCreation.isBusy else { return }
         let target = sessionID.map { id in sessions.first { $0.id == id } } ?? selectedSession
-        guard let session = target, !session.isBusy, !isReserved(session) else { return }
+        guard let session = target, canEdit(session) else { return }
         session.selectImage(url)
     }
 
@@ -113,11 +125,14 @@ public final class BurnStore {
     public func startBurn() { startBurns([selectedSession.burnRequest].compactMap { $0 }) }
 
     public func startBurns(_ requests: [BurnRequest]) {
-        guard !isDemo, !imageCreation.isBusy else { return }
         var started = Set<UUID>()
         for request in requests where started.insert(request.sessionID).inserted {
             guard let session = sessions.first(where: { $0.id == request.sessionID }) else { continue }
-            guard !session.isBusy, !isReserved(session) else { continue }
+            guard canEdit(session) else { continue }
+            if let issue = imageWriteIssue(session.image) {
+                session.errorMessage = issue
+                continue
+            }
             guard session.burnRequest == request else {
                 session.errorMessage = session.preflightIssue ?? "镜像或刻录选项已改变，请重新确认。"
                 continue
@@ -129,8 +144,10 @@ public final class BurnStore {
 
     public func sharedImageIssue(_ image: DiscImage, for session: BurnSession) -> String? {
         if session.isBusy { return "此设备正在刻录，请等待任务结束。" }
+        if session.discCopy.isBusy { return "此光驱正在提取镜像。" }
         if session.isLoadingImage || isReserved(session) { return "此设备正在准备镜像。" }
-        return BurnPreflight.issue(image: image, device: session.device, options: session.options)
+        return imageWriteIssue(image)
+            ?? BurnPreflight.issue(image: image, device: session.device, options: session.options)
     }
 
     /// Called only after the user confirms the image, explicit destinations and their options.
@@ -138,7 +155,7 @@ public final class BurnStore {
     public func startSharedImageBurn(
         image: DiscImage, targetIDs: Set<UUID>, completion: @escaping @MainActor (String?) -> Void
     ) {
-        guard !isDemo, !imageCreation.isBusy, sharedPreparation == nil else {
+        guard !isDemo, sharedPreparation == nil else {
             completion("当前无法准备多机刻录，请等待其他准备任务结束。")
             return
         }
@@ -212,23 +229,117 @@ public final class BurnStore {
         selectedSession.eject()
     }
 
+    public var imageCreationIssue: String? {
+        if mode == .copyDisc { return discCopyIssue(for: selectedSession) }
+        return dataImageCreationIssue
+    }
+
+    private var dataImageCreationIssue: String? {
+        if isDemo { return "请先退出演示。" }
+        if dataImageCreation.isBusy { return "正在从文件创建镜像，请等待此任务完成。" }
+        return dataImageCreation.buildIssue
+    }
+
+    public func discCopyIssue(for session: BurnSession) -> String? {
+        if isDemo { return "请先退出演示。" }
+        if session.discCopy.isBusy { return "此光驱正在提取镜像。" }
+        if session.isBusy { return "此设备正在刻录，请等待任务结束。" }
+        if session.isLoadingImage || isReserved(session) { return "此设备正在准备镜像。" }
+        return ImagePreflight.copyIssue(device: session.device)
+    }
+
+    public func discCopyRequest(for session: BurnSession) -> DiscCopyRequest? {
+        guard discCopyIssue(for: session) == nil, let device = session.device else { return nil }
+        return DiscCopyRequest(device: device, format: session.discCopy.copyFormat)
+    }
+
+    public var readyDiscCopyRequests: [DiscCopyRequest] { sessions.compactMap { discCopyRequest(for: $0) } }
+
     public func createImage(to destination: URL) {
-        guard !isBusy, !isDemo, !isLoadingImage else { return }
         switch mode {
         case .burn: return
-        case .buildISO: imageCreation.build(to: destination)
+        case .buildISO:
+            createDataImage(to: destination)
         case .copyDisc:
-            let sourceID = selectedDeviceID
-            deviceMonitor.refreshDevices()
-            guard selectedDeviceID == sourceID else {
-                imageCreation.errorMessage = "来源光驱已断开，请重新选择。"
-                return
+            guard let request = discCopyRequest(for: selectedSession) else { return }
+            createDiscImage(request, to: destination)
+        }
+    }
+
+    public func createDataImage(to destination: URL) {
+        guard dataImageCreationIssue == nil else { return }
+        if let issue = imageDestinationIssue(destination) {
+            dataImageCreation.errorMessage = issue
+            return
+        }
+        dataImageCreation.build(to: destination)
+    }
+
+    public func createDiscImage(_ request: DiscCopyRequest, to destination: URL) {
+        // Refresh only when connected: injected/test stores retain their own device source.
+        if didStart { deviceMonitor.refreshDevices() }
+        guard let session = sessions.first(where: { $0.deviceID == request.device.id }), !session.discCopy.isBusy else {
+            return
+        }
+        let job = session.discCopy
+        if let issue = discCopyIssue(for: session) {
+            job.errorMessage = issue
+            return
+        }
+        guard let device = session.device, device.mediaBSDName == request.device.mediaBSDName,
+            device.volumeName == request.device.volumeName
+        else {
+            job.errorMessage = "来源光盘已改变，请重新选择保存位置。"
+            return
+        }
+        if let issue = imageDestinationIssue(destination) {
+            job.errorMessage = issue
+            return
+        }
+        job.copyDisc(device, to: destination, format: request.format)
+    }
+
+    private func imageDestinationIssue(_ destination: URL) -> String? {
+        let key = DiscImageName.destinationKey(destination)
+        if activeImageDestinations.contains(key) {
+            return "其他镜像任务正在保存到同一位置，请使用不同的文件名。"
+        }
+        let burnSources = sessions.filter(\.isBusy).compactMap(\.image) + [sharedPreparation?.image].compactMap { $0 }
+        if burnSources.contains(where: { DiscImageName.destinationKey($0.url) == key }) {
+            return "此镜像正用于刻录，请使用不同的文件名。"
+        }
+        return nil
+    }
+
+    private func imageWriteIssue(_ image: DiscImage?) -> String? {
+        guard let image, activeImageDestinations.contains(DiscImageName.destinationKey(image.url)) else { return nil }
+        return "此镜像正在生成或替换，请等待保存完成后重新载入。"
+    }
+
+    private var activeImageDestinations: Set<String> {
+        Set(
+            ([dataImageCreation] + sessions.map(\.discCopy)).filter(\.isBusy)
+                .compactMap { $0.destinationURL.map(DiscImageName.destinationKey) })
+    }
+
+    /// Batch names never overwrite existing files or destinations reserved by other active jobs.
+    public func createDiscImages(_ requests: [DiscCopyRequest], in directory: URL) {
+        guard directory.isFileURL else { return }
+        var reserved = activeImageDestinations
+        var seen = Set<String>()
+        for request in requests where seen.insert(request.device.id).inserted {
+            let base = directory.appendingPathComponent(request.suggestedFileName)
+            var destination = base
+            var suffix = 2
+            while reserved.contains(DiscImageName.destinationKey(destination))
+                || FileManager.default.fileExists(atPath: destination.path)
+            {
+                destination = directory.appendingPathComponent(
+                    "\(base.deletingPathExtension().lastPathComponent) (\(suffix)).\(request.format.rawValue)")
+                suffix += 1
             }
-            if let issue = ImagePreflight.copyIssue(device: selectedDevice) {
-                imageCreation.errorMessage = issue
-            } else if let device = selectedDevice {
-                imageCreation.copyDisc(device, to: destination)
-            }
+            reserved.insert(DiscImageName.destinationKey(destination))
+            createDiscImage(request, to: destination)
         }
     }
 
@@ -246,7 +357,7 @@ public final class BurnStore {
                 "canWrite": true, "speeds": [5540.0, 11080.0], "baseSpeed": 1385.0,
                 "bufferCapacity": 2_097_152, "underrunProtection": true,
             ])
-            let session = BurnSession(engine: makeEngine())
+            let session = BurnSession(engine: makeEngine(), imageService: makeImageService())
             session.startDemo(
                 device: device, imageName: index == 3 ? "Photos-2026.iso" : "Archive-2026.iso", offset: (index - 1) * 8)
             return session
