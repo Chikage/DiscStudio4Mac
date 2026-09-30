@@ -6,6 +6,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface BRDiscEngine : NSObject
 @property (nonatomic, copy, nullable) void (^onDevices)(NSArray<NSDictionary<NSString *, id> *> *);
 @property (nonatomic, copy, nullable) void (^onStatus)(NSDictionary<NSString *, id> *);
+@property (nonatomic, copy, nullable) void (^onDiagnostic)(NSString *);
 - (void)observeDevices;
 - (void)refreshDevices;
 - (void)prepareImageAtURL:(NSURL *)url completion:(void (^)(NSDictionary<NSString *, id> * _Nullable, NSError * _Nullable))completion;

@@ -37,11 +37,17 @@ public final class BurnSession: Identifiable {
     @ObservationIgnored private var imageGeneration = 0
     @ObservationIgnored private var demoTask: Task<Void, Never>?
     @ObservationIgnored private var scopedURL: URL?
+    @ObservationIgnored private var speedDiagnostics = BurnSpeedDiagnostics()
+    @ObservationIgnored private var omittedSpeedLogs = 0
     init(engine: any BurnSessionEngine) {
         self.engine = engine
         engine.onStatus = { [weak self] update in
             guard let self, self.isBusy else { return }
             self.receive(update)
+        }
+        engine.onDiagnostic = { [weak self] message in
+            guard let self, self.isBusy, !self.isDemo else { return }
+            self.appendLog(message)
         }
     }
 
@@ -116,6 +122,11 @@ public final class BurnSession: Identifiable {
         resetSession()
         snapshot.phase = .preparing
         appendLog("开始刻录：\(image?.url.lastPathComponent ?? "") → \(deviceName)")
+        appendLog("[任务标识] \(UUID().uuidString)；设备 ID=\(deviceID)；镜像=\(image?.url.path ?? "未提供")")
+        let requestedSpeed = completedOptions.speed == 0
+            ? "自动 · 请求设备最高速度（speed=0）"
+            : String(format: "%.3f KB/s（%.3f MB/s）", completedOptions.speed, completedOptions.speed / 1000)
+        appendLog("[所选写入速度] \(requestedSpeed)；请求速度不代表实际写入速度。KB=1000 字节。")
         appendLog("封盘：\(options.finalize ? "开启" : "保留追加能力")；回读校验：\(options.verify ? "开启" : "关闭")；欠载保护：已请求。")
         do {
             try engine.start(onDevice: deviceID, options: completedOptions)
@@ -164,15 +175,25 @@ public final class BurnSession: Identifiable {
     public var logText: String {
         let formatter = ISO8601DateFormatter()
         return
-            (["Disc Studio 刻录日志\(isDemo ? " [演示数据]" : "")", "设备：\(deviceName) · \(deviceID)"]
+            (["Disc Studio 刻录日志\(isDemo ? " [演示数据]" : "")", "设备：\(deviceName) · \(deviceID)",
+              "写入速度按 15 秒采样并汇总期间最低／最高值，轨道或阶段结束时结算末段；缺失值不作零处理。",
+              "周期采样保留最近 400 条，已省略 \(omittedSpeedLogs) 条；关键事件独立保留最近 500 条。"]
             + logs.map {
                 "[\(formatter.string(from: $0.date))] \($0.message)"
             }).joined(separator: "\n")
     }
 
-    private func appendLog(_ message: String) {
-        logs.append(BurnLogEntry(message))
-        if logs.count > 500 { logs.removeFirst(logs.count - 500) }
+    private func appendLog(_ message: String, isSpeedSample: Bool = false) {
+        var entry = BurnLogEntry(message)
+        entry.isSpeedSample = isSpeedSample
+        logs.append(entry)
+        let limit = isSpeedSample ? 400 : 500
+        if logs.lazy.filter({ $0.isSpeedSample == isSpeedSample }).count > limit,
+            let index = logs.firstIndex(where: { $0.isSpeedSample == isSpeedSample })
+        {
+            logs.remove(at: index)
+            if isSpeedSample { omittedSpeedLogs += 1 }
+        }
     }
 
     private func resetSession() {
@@ -184,6 +205,7 @@ public final class BurnSession: Identifiable {
         finishedAt = nil
         lastStatusAt = nil
         completedOptions = options
+        speedDiagnostics = BurnSpeedDiagnostics()
         errorMessage = nil
     }
 
@@ -191,6 +213,11 @@ public final class BurnSession: Identifiable {
         let previous = snapshot.phase
         let now = Date()
         let seconds = elapsed(at: now)
+        if !isDemo {
+            for message in speedDiagnostics.record(update, at: seconds) {
+                appendLog(message, isSpeedSample: true)
+            }
+        }
         if previous == .verifying, update.phase == .completed,
             let measurement = verificationSpeed.finish(totalBytes: image?.burnBytes ?? 0, at: seconds)
         {

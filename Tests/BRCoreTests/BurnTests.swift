@@ -54,6 +54,11 @@ struct BurnTests {
         let clamped = BurnSnapshot(dictionary: ["phase": "writing", "progress": 1.2, "speedKB": 11080])
         #expect(clamped.progress == 1)
         #expect(clamped.speedKB == 11080)
+        let raw = BurnSnapshot(dictionary: [
+            "phase": "writing", "rawState": "DRStatusStateTrackWrite", "currentSpeedRaw": "8992",
+        ])
+        #expect(raw.rawState == "DRStatusStateTrackWrite")
+        #expect(raw.currentSpeedRaw == "8992")
     }
 
     @Test func verificationDoesNotShowStaleWriteSpeedOrPrematureCompletion() {

@@ -6,6 +6,7 @@ import Testing
 @MainActor
 private final class ControlledBurnEngine: BurnSessionEngine {
     var onStatus: (@MainActor (BurnSnapshot) -> Void)?
+    var onDiagnostic: (@MainActor (String) -> Void)?
     var preparations: [(URL, @MainActor (Result<DiscImage, any Error>) -> Void)] = []
     var starts: [(String, BurnOptions)] = []
     var cancellations = 0
@@ -85,6 +86,8 @@ struct MultiBurnTests {
         #expect(store.activeBurnCount == 2)
         #expect(engines[0].starts.map(\.0) == ["A"])
         #expect(engines[1].starts.map(\.0) == ["B"])
+        #expect(engines[0].starts[0].1.speed == 5540)
+        #expect(engines[1].starts[0].1.speed == 11080)
         #expect(!first.completedOptions.verify)
         #expect(store.selectedSession.completedOptions.verify)
         #expect(first.image?.url.path == "/first.iso")
@@ -113,6 +116,43 @@ struct MultiBurnTests {
         #expect(store.isBusy)
         engines[1].send(.completed, progress: 1)
         #expect(!store.isBusy)
+    }
+
+    @Test func diagnosticLogsStayWithTheirDeviceAndRetainStartupAfterManySamples() throws {
+        let (store, engines) = setup()
+        load("/first.iso", on: "A", store: store, engine: engines[0])
+        store.options.speed = 5540
+        store.startBurn()
+        let first = store.selectedSession
+        engines[0].onDiagnostic?("[原生速度请求] native-A")
+        load("/second.iso", on: "B", store: store, engine: engines[1])
+        store.startBurn()
+        engines[1].onDiagnostic?("[原生速度请求] native-B")
+        // Each track begins a sample immediately, allowing retention testing without wall-clock waits.
+        for track in 1...405 {
+            var update = BurnSnapshot()
+            update.phase = .writing
+            update.track = track
+            update.speedKB = 5000
+            engines[0].onStatus?(update)
+        }
+        #expect(first.logs.filter(\.isSpeedSample).count == 400)
+        #expect(first.logText.contains("已省略 5 条"))
+        #expect(first.logText.contains("[所选写入速度] 5540.000 KB/s"))
+        #expect(first.logText.contains("native-A"))
+        #expect(!first.logText.contains("native-B"))
+        #expect(store.selectedSession.logText.contains("自动 · 请求设备最高速度"))
+        #expect(store.selectedSession.logText.contains("native-B"))
+        #expect(!store.selectedSession.logText.contains("native-A"))
+        engines[0].send(.failed)
+        engines[0].onDiagnostic?("late-callback")
+        #expect(first.logText.contains("设备已断开"))
+        #expect(!first.logText.contains("late-callback"))
+        store.selectedDeviceID = "A"
+        store.startBurn()
+        engines[0].send(.writing, speed: 1000)
+        let restartedSample = first.logs.last(where: { $0.isSpeedSample })
+        #expect(restartedSample?.message.contains("本段最低–最高=1000.000–1000.000 KB/s") == true)
     }
 
     @Test func sharedImageUsesSeparatePreparationsAndFailureDoesNotBlockOtherStarts() throws {
@@ -266,7 +306,9 @@ struct MultiBurnTests {
         load("/source.iso", on: "A", store: store, engine: engines[0])
         store.selectedDeviceID = "B"
         store.options.verify = false
+        store.options.speed = 11080
         store.selectedDeviceID = "A"
+        store.options.speed = 5540
         let source = try #require(store.image)
         let ids = Set(store.sessions.prefix(2).map(\.id))
         var completed = false
@@ -293,6 +335,8 @@ struct MultiBurnTests {
         #expect(store.activeBurnCount == 2)
         #expect(engines[0].starts.count == 1 && engines[1].starts.count == 1)
         #expect(!engines[1].starts[0].1.verify)
+        #expect(engines[0].starts[0].1.speed == 5540)
+        #expect(engines[1].starts[0].1.speed == 11080)
         #expect(engines[2].starts.isEmpty)
         #expect(store.sessions[2].image?.url.path == "/unselected.iso")
     }
@@ -404,11 +448,15 @@ struct MultiBurnTests {
             }
         }
         #expect(failed)
+        var diagnosticMessages: [String] = []
+        second.onDiagnostic = { diagnosticMessages.append($0) }
         do {
             try second.start(onDevice: "nonexistent-device", options: BurnOptions())
             Issue.record("An invalid device must never start")
         } catch {
             #expect(error.localizedDescription.contains("断开"))
         }
+        #expect(diagnosticMessages.contains { $0.contains("输入 speed=0.000") && $0.contains("DRDeviceBurnSpeedMax") })
+        #expect(diagnosticMessages.contains { $0.contains("轨道 1") && $0.contains("DRMaxBurnSpeedKey=") })
     }
 }

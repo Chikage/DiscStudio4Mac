@@ -118,6 +118,9 @@ public struct BurnSnapshot: Sendable {
     public var progress: Double?
     public var speedKB: Double?
     public var speedX: Double?
+    public var rawState: String?
+    /// Preserve the SDK's raw value; its public header does not specify a unit.
+    public var currentSpeedRaw: String?
     public var track: Int?
     public var error: String?
     public var cancelling = false
@@ -126,6 +129,8 @@ public struct BurnSnapshot: Sendable {
 
     public init(dictionary: [String: Any]) {
         phase = BurnPhase(rawValue: dictionary["phase"] as? String ?? "") ?? .preparing
+        rawState = dictionary["rawState"] as? String
+        currentSpeedRaw = dictionary["currentSpeedRaw"] as? String
         if let value = (dictionary["progress"] as? NSNumber)?.doubleValue, value.isFinite {
             progress = min(1, max(0, value))
         }
@@ -260,6 +265,7 @@ public struct BurnLogEntry: Identifiable, Sendable {
     public let id = UUID()
     public let date = Date()
     public let message: String
+    var isSpeedSample = false
     public init(_ message: String) { self.message = message }
 }
 

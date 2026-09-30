@@ -24,6 +24,7 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
 @property (nonatomic) NSUInteger preparationGeneration;
 @property (nonatomic) BOOL cancellationRequested;
 @property (nonatomic, strong, nullable) id activity;
+@property (nonatomic, copy, nullable) NSString *lastDiagnosticState;
 @end
 
 @implementation BRDiscEngine
@@ -168,9 +169,30 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
     });
 }
 
+- (void)logDiagnostic:(NSString *)message {
+    if (self.onDiagnostic) self.onDiagnostic(message);
+}
+
+- (void)logTrackSpeeds:(NSString *)context {
+    if (!self.onDiagnostic) return;
+    NSArray<DRTrack *> *tracks = BRTracks(self.layout);
+    for (NSUInteger index = 0; index < tracks.count; index++) {
+        id limit = tracks[index].properties[DRMaxBurnSpeedKey];
+        [self logDiagnostic:[NSString stringWithFormat:
+            @"[轨道速度上限 · %@] 轨道 %lu；DRMaxBurnSpeedKey=%@",
+            context, (unsigned long)index + 1,
+            limit ? [NSString stringWithFormat:@"%@ KB/s", limit] : @"未设置（SDK 默认不限速）"]];
+    }
+}
+
 - (BOOL)startOnDevice:(NSString *)identifier speed:(double)speed finalize:(BOOL)finalize
                verify:(BOOL)verify eject:(BOOL)eject error:(NSError **)error {
     NSAssert(NSThread.isMainThread, @"Use BRDiscEngine on the main thread");
+    [self logDiagnostic:[NSString stringWithFormat:
+        @"[原生速度请求] 设备 ID=%@；输入 speed=%.3f；DRBurnRequestedSpeedKey=%@%@",
+        identifier, speed, @(speed > 0 ? speed : DRDeviceBurnSpeedMax),
+        speed > 0 ? @" KB/s" : @"（DRDeviceBurnSpeedMax，自动最高速度标记，并非实际 KB/s）"]];
+    [self logTrackSpeeds:@"写入前"];
     NSString *failure = nil;
     DRDevice *device = [DRDevice deviceForIORegistryEntryPath:identifier];
     NSDictionary *attributes = self.imageURL ? [NSFileManager.defaultManager attributesOfItemAtPath:self.imageURL.path error:nil] : nil;
@@ -186,6 +208,12 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
     else if (!device.mediaIsBlank) failure = @"请使用空白光盘；Disc Studio 不会自动擦除已有数据。";
     else {
         NSDictionary *snapshot = [self snapshot:device];
+        [self logDiagnostic:[NSString stringWithFormat:
+            @"[设备与介质] 型号=%@；固件=%@；连接=%@；位置=%@；介质=%@；1×=%@ KB/s",
+            snapshot[@"name"], snapshot[@"firmware"] ?: @"未提供", snapshot[@"interconnect"] ?: @"未提供",
+            snapshot[@"location"] ?: @"未提供", snapshot[@"media"], snapshot[@"baseSpeed"]]];
+        [self logDiagnostic:[NSString stringWithFormat:@"[支持写入速度] DRDeviceBurnSpeedsKey（KB/s）=%@",
+            [snapshot[@"speeds"] count] ? [snapshot[@"speeds"] componentsJoinedByString:@", "] : @"未提供"]];
         if ([snapshot[@"freeBlocks"] unsignedLongLongValue] < self.requiredBlocks) failure = @"光盘可用容量不足，或设备尚未报告容量。";
         if (speed > 0 && ![snapshot[@"speeds"] containsObject:@(speed)]) failure = @"当前光盘不再支持所选速度，请刷新设备后重试。";
     }
@@ -201,6 +229,10 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
                               DRBurnCompletionActionKey: eject ? DRBurnCompletionActionEject : DRBurnCompletionActionMount,
                               DRBurnFailureActionKey: DRBurnFailureActionNone}];
         self.burn = burn;
+        self.lastDiagnosticState = nil;
+        [self logDiagnostic:[NSString stringWithFormat:@"[引擎速度属性] DRBurnRequestedSpeedKey=%@%@",
+            burn.properties[DRBurnRequestedSpeedKey] ?: @"未提供",
+            speed > 0 ? @" KB/s" : @"（自动最高速度标记）"]];
         self.cancellationRequested = NO;
         self.activity = [NSProcessInfo.processInfo beginActivityWithOptions:NSActivityUserInitiated | NSActivityIdleSystemSleepDisabled
                                                                    reason:@"正在刻录并校验光盘"];
@@ -237,6 +269,16 @@ static NSArray<DRTrack *> *BRTracks(id layout) {
         @"cancelling": @(self.cancellationRequested && !terminal)} mutableCopy];
     if (status[DRStatusPercentCompleteKey]) result[@"progress"] = status[DRStatusPercentCompleteKey];
     NSDictionary *progress = status[DRStatusProgressInfoKey];
+    if (status[DRStatusCurrentSpeedKey]) result[@"currentSpeedRaw"] = [status[DRStatusCurrentSpeedKey] description];
+    NSString *diagnosticState = [NSString stringWithFormat:@"%@ / track=%@", state ?: @"未提供",
+                                status[DRStatusCurrentTrackKey] ?: @"未提供"];
+    if (![diagnosticState isEqual:self.lastDiagnosticState]) {
+        self.lastDiagnosticState = diagnosticState;
+        [self logDiagnostic:[NSString stringWithFormat:@"[原生状态] %@；DRStatusCurrentSpeedKey(raw)=%@",
+            diagnosticState, result[@"currentSpeedRaw"] ?: @"未提供"]];
+        // Image producers may fill track properties only when preparing the actual burn.
+        if ([phase isEqual:@"writing"]) [self logTrackSpeeds:@"进入写入"];
+    }
     if ([phase isEqual:@"writing"]) {
         NSNumber *speed = progress[DRStatusProgressCurrentKPS];
         if (speed) result[@"speedKB"] = speed;

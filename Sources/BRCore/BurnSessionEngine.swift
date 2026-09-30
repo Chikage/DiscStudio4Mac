@@ -5,6 +5,7 @@ import Foundation
 @MainActor
 protocol BurnSessionEngine: AnyObject {
     var onStatus: (@MainActor (BurnSnapshot) -> Void)? { get set }
+    var onDiagnostic: (@MainActor (String) -> Void)? { get set }
     func prepareImage(at url: URL, completion: @escaping @MainActor (Result<DiscImage, any Error>) -> Void)
     func start(onDevice identifier: String, options: BurnOptions) throws
     func cancel()
@@ -14,12 +15,16 @@ protocol BurnSessionEngine: AnyObject {
 @MainActor
 final class NativeBurnSessionEngine: BurnSessionEngine {
     var onStatus: (@MainActor (BurnSnapshot) -> Void)?
+    var onDiagnostic: (@MainActor (String) -> Void)?
     private let engine = BRDiscEngine()
 
     init() {
         engine.onStatus = { [weak self] dictionary in
             let snapshot = BurnSnapshot(dictionary: dictionary)
             MainActor.assumeIsolated { self?.onStatus?(snapshot) }
+        }
+        engine.onDiagnostic = { [weak self] message in
+            MainActor.assumeIsolated { self?.onDiagnostic?(message) }
         }
     }
 
